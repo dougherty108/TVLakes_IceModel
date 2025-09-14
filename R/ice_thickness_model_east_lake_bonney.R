@@ -70,7 +70,7 @@ rho <- 917              # Density of ice (kg/m^3)
 c <- 2100               # Specific heat capacity of ice (J/kg/K)
 alpha <- k / (rho * c)  # Thermal diffusivity (m^2/s)
 L_f <- xLf  
-Chi = 0.3               
+Chi = 0.4               # Solar Absorption constant (adustable)             
 
 
 # Stability check: Ensure R < 0.5 for stability
@@ -79,7 +79,7 @@ if (r > 0.5) stop("r > 0.5, solution may be unstable. Reduce dt or dx.")
 
 ###################### Separate data out into input parameters ######################
 #preemptively set working directory back 
-setwd("~/Documents/R-Repositories/TVLakes_Sediment")
+setwd("~/Documents/R-Repositories/TVLakes_IceModel")
 
 # select air temperature data from Lake Bonney Met, and gapfill holes with Lake Hoare
 # this step is mainly to gather a time series for gap filling other portions of the script. Air temperature data is sourced 
@@ -235,7 +235,7 @@ ice_thickness <- read_csv("Data/mcmlter-lake-ice_thickness-20250218_0_2025.csv")
 
 ###################### ALBEDO DATA ######################
 # Load and prepare the data
-albedo_orig <- read_csv("DataOut/AlbedoModel.csv") |>  
+albedo_orig <- read_csv("Data/AlbedoModel.csv") |>  
  # mutate(sediment = sediment_abundance) |> 
   filter(lake == "East Lake Bonney") |> 
   mutate(date = ymd(sed.date),  # or ymd() if no time data is present, adjust as needed
@@ -292,7 +292,7 @@ LWR_out_interp <- approx(
 #reshape albedo (use this for the GEE dataset)
 albedo_interp <- approx(
   x = as.numeric(albedo1$time),                     # Original dates as numeric
-  y = albedo1$albedo.predict.bb,                          # Albedo means to interpolate
+  y = albedo1$albedo.predict.bb,                   # Albedo means to interpolate
   xout = as.numeric(time_model),                   # Target times as numeric
   rule = 2                                         # Constant extrapolation for out-of-bound values
 )$y
@@ -342,7 +342,6 @@ time_series <- tibble(
   SW_in = sw_interp,                           # Interpolated shortwave radiation w/m2
   LWR_in = LWR_in_interp,                      # Interpolated incoming longwave radiation w/m2
   LWR_out = LWR_out_interp,                    # Interpolated outgoing longwave radiation w/m2
-  #albedo = (0.14 + ((albedo_interp)*0.6959)),  # albedo, unitless (lower albedo value from measured BOYM data)
   albedo = albedo_interp,
   pressure = pressure_interp,                  # Interpolated air pressure, Pa
   wind = wind_interp,                          # interpolated wind speed, m/s
@@ -374,6 +373,7 @@ results <- tibble(
   thickness = numeric(n_iterations),         # Initialize `thickness` as numeric
   LW_net = numeric(n_iterations),            # Net Longwave flux
   SW = numeric(n_iterations),                # Shortwave Radiation Flux
+  SW_abs = numeric(n_iterations),            # Absorbed shortwave radiation
   sensible_Q = numeric(n_iterations), 
   latent_Q = numeric(n_iterations), 
   conductive_Q = numeric(n_iterations),
@@ -407,7 +407,8 @@ for (t_idx in 1:nrow(time_series)) {
   results$temperature[t_idx] <- prevT
   results$thickness[t_idx] <- prevL
   results$LW_net[t_idx] <- LW_net
-  results$SW[t_idx] <- SW_abs
+  results$SW_abs[t_idx] <- SW_abs
+  results$SW[t_idx] <- SW_in
   results$sensible_Q <- Qh
   results$latent_Q <- Ql
   results$conductive_Q <- Qc
@@ -466,7 +467,7 @@ for (t_idx in 1:nrow(time_series)) {
     ea = ((rh/100)* A * exp((B * (T_air - Tf))/(C + (T_air - Tf))))/100
     
     # compute the density of air slightly conflicts with what we have above
-    #rho_air = press * Ma/(R * T_air) * (1 + (epsilon - 1) * (ea/press))
+    rho_air = press * Ma/(R * T_air) * (1 + (epsilon - 1) * (ea/press))
     
     # Water vapor pressure at the surface assuming surface is the 
     # below freezing
@@ -474,7 +475,7 @@ for (t_idx in 1:nrow(time_series)) {
     
     Ql = rho_air*(xLatent)*Ce*(0.622/press)*(ea - es0)*wind
   }
-  
+
   if (newT[1] < Tf) {
     A = 6.1115
     B = 22.452
@@ -484,9 +485,9 @@ for (t_idx in 1:nrow(time_series)) {
     # Compute atmospheric vapor pressure from relative humidity data
     ea = ((rh/100) * A * exp((B * (T_air - Tf))/(C + (T_air - Tf)))) / 100
     
-    #rho_air = press * Ma/(R * T_air) * (1 + (epsilon - 1) * (ea/press))
+    rho_air = press * Ma/(R * T_air) * (1 + (epsilon - 1) * (ea/press))
     
-    # Compute the water vapor pressure at the surface assuming surface
+    #Compute the water vapor pressure at the surface assuming surface
     # is same temp as air
     es0 = (A * exp((B * (T_air - Tf))/(C + (T_air - Tf)))) / 100
     
@@ -546,6 +547,18 @@ results |>
   ) +
   geom_point(data = ice_thickness, aes(x = date_time, y = z_water_m)) + 
   theme_linedraw(base_size = 20)
+
+### pivot results dataframe for plotting of all the fluxes through time
+result_flux = results |> 
+  pivot_longer(cols = c(depth, temperature, thickness, LW_net, SW, SW_abs, sensible_Q, latent_Q, 
+                        conductive_Q, surface_heat_flux), 
+               names_to = "flux", 
+               values_to = "value")
+
+ggplot(result_flux, aes(time, value, color = flux)) + 
+  geom_path() + 
+  facet_wrap(~flux, scales = "free")
+
 
 #troubleshooting plots, to find distance of change at top and bottom
 plot(dL_bottom.vec)
