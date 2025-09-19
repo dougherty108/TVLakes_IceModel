@@ -2,11 +2,11 @@
 
 ### Authors
 # Charlie Dougherty
-# April 29, 2025
+# September 19, 2025
 
 
 # NOTES
-# This script models ice thickness at an adjustable vertical depth and timestep through time at East Lake Bonney, Taylor Valley, Antarctica
+# This script models ice thickness at an adjustable vertical depth and timestep through time at Lake Fryxell, Taylor Valley, Antarctica
 # Ice thickness is modeled by solving the heat equation in the vertical axis iteratively, and correcting for surface mass loss by modeling different
 # surface fluxes.
 # Data is provided primarily by the McMurdo Dry Valleys Long Term Ecological Research project, with albedo surface estimates coming from 
@@ -26,26 +26,31 @@ setwd("~chdo4929")
 
 ###################### Load Time Series Data by Station ######################
 # met station data can be found at the McMurdo Long Term Ecological Research website or on the Environmental Data Initiative
-BOYM <- read_csv("~/Library/CloudStorage/OneDrive-UCB-O365/Documents/MCM-LTER_Met/met stations/mcmlter-clim_boym_15min-20250205.csv") |> 
-  mutate(date_time = ymd_hms(date_time)) |> 
-  filter(date_time > '2016-12-21 00:00:00')
+#BOYM <- read_csv("~/Library/CloudStorage/OneDrive-UCB-O365/Documents/MCM-LTER_Met/met stations/mcmlter-clim_boym_15min-20250205.csv") |> 
+#  mutate(date_time = ymd_hms(date_time)) |> 
+#  filter(date_time > '2016-12-11 00:00:00')
 
 HOEM <- read_csv("~/Library/CloudStorage/OneDrive-UCB-O365/Documents/MCM-LTER_Met/met stations/mcmlter-clim_hoem_15min-20250205.csv") |> 
   mutate(date_time = ymd_hms(date_time)) |> 
-  filter(date_time > '2016-12-21 00:00:00') |> 
+  filter(date_time > '2016-12-11 00:00:00') |> 
   mutate(airtemp_3m_K = airtemp_3m_degc + 273.15)
 
 COHM <- read_csv("~/Library/CloudStorage/OneDrive-UCB-O365/Documents/MCM-LTER_Met/met stations/mcmlter-clim_cohm_15min-20250205.csv") |> 
   mutate(date_time = ymd_hms(date_time)) |> 
-  filter(date_time > '2016-12-21 00:00:00')
+  filter(date_time > '2016-12-11 00:00:00')
 
 TARM <- read_csv("~/Library/CloudStorage/OneDrive-UCB-O365/Documents/MCM-LTER_Met/met stations/mcmlter-clim_tarm_15min-20250205.csv") |> 
+  mutate(date_time = ymd_hms(date_time)) |> 
+  filter(date_time > '2016-12-11 00:00:00') |> 
+  mutate(airtemp_3m_K = airtemp_3m_degc + 273.15)
+
+FRLM <- read_csv("~/Library/CloudStorage/OneDrive-UCB-O365/Documents/MCM-LTER_Met/met stations/mcmlter-clim_frlm_15min-20250205.csv") |> 
   mutate(date_time = ymd_hms(date_time)) |> 
   filter(date_time > '2016-12-21 00:00:00') |> 
   mutate(airtemp_3m_K = airtemp_3m_degc + 273.15)
 
 ###################### Define Parameters ######################
-L_initial <- 3.88       # Initial ice thickness (m) Ice thickness at 12/17/2016 ice to ice
+L_initial <- 4.60       # Initial ice thickness (m) Ice thickness at 12/17/2016 ice to ice
 dx <- 0.10              # Spatial step size (m)
 nx = L_initial/dx       # Number of spatial steps
 dt <-  1/24             # Time step for stability (in days)
@@ -89,18 +94,18 @@ setwd("~/Documents/R-Repositories/TVLakes_IceModel")
 ## load air temperature data from East Lake Bonney Lake Monitoring Station (unpublished data)
 
 #time_model = start_time + seq(0, by = dt* 86400, length.out = nt)  # Convert dt from days to seconds
-start_time <- min(BOYM$date_time)
+start_time <- min(FRLM$date_time)
 
 # Generate model time steps (POSIXct format)
 time_model <- start_time + seq(0, by = dt * 86400, length.out = nt)  # Convert dt from days to seconds
 
 
-air_temperature <- read_csv("Data/air_temp_ELBBB.csv") |> 
+air_temperature <- read_csv("Data/air_temp_LFBB.csv") |> 
   mutate(date_time = mdy_hm(date_time), 
-         airtemp_3m_K = surface_temp_C + 273.15)
+         airtemp_3m_K = surftemp_degc + 273.15)
 
-# load air temperature data from the West Lake Bonney Lake Monitoring Station, to fill gaps in the ELBBB record
-wlbbb_airtemp <- read_csv('Data/air_temp_WLBBB.csv') |> 
+# load air temperature data from the East Lake Bonney Lake Monitoring Station, to fill gaps in the LFBB record
+elbbb_airtemp <- read_csv('Data/air_temp_ELBBB.csv') |> 
   mutate(date_time = mdy_hm(date_time), 
          airtemp_3m_K = surface_temp_C + 273.15) |> 
   filter(date_time < "2023-11-01 00:00:00")
@@ -116,12 +121,12 @@ air_temp_gaps <- full_timestamps |>
 
 # fill gaps in record at East Lake Bonney with data from West Lake Bonney
 air_temperature <- air_temp_gaps |> 
-  mutate(airtemp_3m_K = ifelse(is.na(airtemp_3m_K), wlbbb_airtemp$airtemp_3m_K, airtemp_3m_K))
+  mutate(airtemp_3m_K = ifelse(is.na(airtemp_3m_K), elbbb_airtemp$airtemp_3m_K, airtemp_3m_K))
 
 ###################### SHORTWAVE RADIATION DATA ######################
 # select incoming shortwave radiation data from Lake Bonney Met and fill gaps. Gaps are first filled with data from the 
 # next nearest station (Taylor Glacier Met), but failing that, an empirical equation defined in Obryk et al, 2016 is used. 
-shortwave_radiation_initial <- BOYM |> 
+shortwave_radiation_initial <- FRLM |> 
   dplyr::select(metlocid, date_time, swradin_wm2) |> 
   mutate(swradin_wm2 = ifelse(is.na(swradin_wm2), TARM$swradin_wm2, swradin_wm2)) # replace empty shortwave data with TARM, nearest met station
 
@@ -212,14 +217,14 @@ air_pressure = HOEM |>
 
 
 ###################### WIND SPEED DATA ######################
-wind_speed = BOYM |> 
+wind_speed = FRLM |> 
   dplyr::select(metlocid, date_time, wspd_ms) |>  # wind speed is in meters per second
   mutate(wspd_ms = ifelse(is.na(wspd_ms), TARM$wspd_ms, wspd_ms)) # fill in lost wind values from TARM, next nearest met station
 
 
 ###################### RELATIVE HUMIDITY DATA ######################
 # load relative humidity data
-relative_humidity <- BOYM |> 
+relative_humidity <- FRLM |> 
   dplyr::select(metlocid, date_time, rhh2o_3m_pct, rhice_3m_pct) |> 
   mutate(rhh2o_3m_pct = ifelse(is.na(rhh2o_3m_pct), TARM$rhh2o_3m_pct, rhh2o_3m_pct))
 
@@ -229,7 +234,7 @@ relative_humidity <- BOYM |>
 ice_thickness <- read_csv("Data/mcmlter-lake-ice_thickness-20250218_0_2025.csv") |>
   mutate(date_time = mdy_hm(date_time), 
          z_water_m = z_water_m*-1) |> 
-  filter(location_name == "East Lake Bonney") |> 
+  filter(location_name == "Lake Fryxell") |> 
   filter(date_time > "2016-12-01" & date_time < "2024-02-01")
 
 
@@ -237,7 +242,7 @@ ice_thickness <- read_csv("Data/mcmlter-lake-ice_thickness-20250218_0_2025.csv")
 # Load and prepare the data
 albedo_orig <- read_csv("Data/AlbedoModel.csv") |>  
   # mutate(sediment = sediment_abundance) |> 
-  filter(lake == "East Lake Bonney") |> 
+  filter(lake == "Lake Fryxell") |> 
   mutate(date = ymd(sed.date),  # or ymd() if no time data is present, adjust as needed
          month = month(sed.date), 
          year = year(sed.date)) |> 
