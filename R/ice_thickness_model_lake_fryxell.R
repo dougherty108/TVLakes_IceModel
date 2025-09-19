@@ -46,7 +46,12 @@ TARM <- read_csv("~/Library/CloudStorage/OneDrive-UCB-O365/Documents/MCM-LTER_Me
 
 FRLM <- read_csv("~/Library/CloudStorage/OneDrive-UCB-O365/Documents/MCM-LTER_Met/met stations/mcmlter-clim_frlm_15min-20250205.csv") |> 
   mutate(date_time = ymd_hms(date_time)) |> 
-  filter(date_time > '2016-12-21 00:00:00') |> 
+  filter(date_time > '2016-12-11 00:00:00') |> 
+  mutate(airtemp_3m_K = airtemp_3m_degc + 273.15)
+
+ EXEM <-  read_csv("~/Library/CloudStorage/OneDrive-UCB-O365/Documents/MCM-LTER_Met/met stations/mcmlter-clim_exem_15min-20250205.csv") |> 
+  mutate(date_time = ymd_hms(date_time)) |> 
+  filter(date_time > '2016-12-11 00:00:00') |> 
   mutate(airtemp_3m_K = airtemp_3m_degc + 273.15)
 
 ###################### Define Parameters ######################
@@ -128,7 +133,7 @@ air_temperature <- air_temp_gaps |>
 # next nearest station (Taylor Glacier Met), but failing that, an empirical equation defined in Obryk et al, 2016 is used. 
 shortwave_radiation_initial <- FRLM |> 
   dplyr::select(metlocid, date_time, swradin_wm2) |> 
-  mutate(swradin_wm2 = ifelse(is.na(swradin_wm2), TARM$swradin_wm2, swradin_wm2)) # replace empty shortwave data with TARM, nearest met station
+  mutate(swradin_wm2 = ifelse(is.na(swradin_wm2), EXEM$swradin_wm2, swradin_wm2)) # replace empty shortwave data with TARM, nearest met station
 
 # create an artificial shortwave object
 # Coordinates of East Lobe Bonney Blue Box
@@ -219,7 +224,7 @@ air_pressure = HOEM |>
 ###################### WIND SPEED DATA ######################
 wind_speed = FRLM |> 
   dplyr::select(metlocid, date_time, wspd_ms) |>  # wind speed is in meters per second
-  mutate(wspd_ms = ifelse(is.na(wspd_ms), TARM$wspd_ms, wspd_ms)) # fill in lost wind values from TARM, next nearest met station
+  mutate(wspd_ms = ifelse(is.na(wspd_ms), EXEM$wspd_ms, wspd_ms)) # fill in lost wind values from TARM, next nearest met station
 
 
 ###################### RELATIVE HUMIDITY DATA ######################
