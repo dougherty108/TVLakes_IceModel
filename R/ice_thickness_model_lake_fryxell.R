@@ -49,7 +49,7 @@ FRLM <- read_csv("~/Library/CloudStorage/OneDrive-UCB-O365/Documents/MCM-LTER_Me
   filter(date_time > '2016-12-11 00:00:00') |> 
   mutate(airtemp_3m_K = airtemp_3m_degc + 273.15)
 
- EXEM <-  read_csv("~/Library/CloudStorage/OneDrive-UCB-O365/Documents/MCM-LTER_Met/met stations/mcmlter-clim_exem_15min-20250205.csv") |> 
+EXEM <-  read_csv("~/Library/CloudStorage/OneDrive-UCB-O365/Documents/MCM-LTER_Met/met stations/mcmlter-clim_exem_15min-20250205.csv") |> 
   mutate(date_time = ymd_hms(date_time)) |> 
   filter(date_time > '2016-12-11 00:00:00') |> 
   mutate(airtemp_3m_K = airtemp_3m_degc + 273.15)
@@ -231,7 +231,7 @@ wind_speed = FRLM |>
 # load relative humidity data
 relative_humidity <- FRLM |> 
   dplyr::select(metlocid, date_time, rhh2o_3m_pct, rhice_3m_pct) |> 
-  mutate(rhh2o_3m_pct = ifelse(is.na(rhh2o_3m_pct), TARM$rhh2o_3m_pct, rhh2o_3m_pct))
+  mutate(rhh2o_3m_pct = ifelse(is.na(rhh2o_3m_pct), EXEM$rhh2o_3m_pct, rhh2o_3m_pct))
 
 
 ###################### ICE THICKNESS DATA ######################
@@ -552,10 +552,11 @@ results |>
   group_by(time) |> 
   summarize(thickness = max(thickness)) |> 
   ggplot(aes(x = time, y = thickness)) +
-  geom_line(color = "darkgreen", size = 1) +
+  geom_line(color = "darkblue", size = 1) +
   labs(x = "Time", y = "Ice Thickness (m)"
   ) +
   geom_point(data = ice_thickness, aes(x = date_time, y = z_water_m)) + 
+  ggtitle("Lake Fryxell") +  
   theme_linedraw(base_size = 20)
 
 ### pivot results dataframe for plotting of all the fluxes through time

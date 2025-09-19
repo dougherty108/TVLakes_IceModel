@@ -546,6 +546,7 @@ results |>
   labs(x = "Time", y = "Ice Thickness (m)"
   ) +
   geom_point(data = ice_thickness, aes(x = date_time, y = z_water_m)) + 
+  ggtitle("East Lake Bonney") +
   theme_linedraw(base_size = 20)
 
 ### pivot results dataframe for plotting of all the fluxes through time

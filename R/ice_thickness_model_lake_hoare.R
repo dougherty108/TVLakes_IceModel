@@ -538,15 +538,17 @@ for (t_idx in 1:nrow(time_series)) {
   pb$tick()
 }
 
+ 
 ###################### plotting of results ######################
 results |> 
   group_by(time) |> 
   summarize(thickness = max(thickness)) |> 
   ggplot(aes(x = time, y = thickness)) +
-  geom_line(color = "darkgreen", size = 1) +
+  geom_line(color = "darkred", size = 1) +
   labs(x = "Time", y = "Ice Thickness (m)"
   ) +
   geom_point(data = ice_thickness, aes(x = date_time, y = z_water_m)) + 
+  ggtitle("Lake Hoare") +
   theme_linedraw(base_size = 20)
 
 ### pivot results dataframe for plotting of all the fluxes through time
