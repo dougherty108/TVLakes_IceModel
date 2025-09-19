@@ -574,7 +574,7 @@ results_year_min = results |>
   group_by(year) |> 
   slice_min(order_by = thickness, n = 1) |> 
   select(year, date) |> 
-  ungroup()
+  ungroup() |> print()
 
 #troubleshooting plots, to find distance of change at top and bottom
 plot(dL_bottom.vec)
