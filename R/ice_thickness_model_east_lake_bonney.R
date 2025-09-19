@@ -21,25 +21,25 @@ library(suncalc) # for sun angle estimates
 
 
 #set working directory
-setwd("~charliedougherty")
+setwd("~chdo4929")
 
 
 ###################### Load Time Series Data by Station ######################
 # met station data can be found at the McMurdo Long Term Ecological Research website or on the Environmental Data Initiative
-BOYM <- read_csv("~/Google Drive/My Drive/MCMLTER_Met/met stations/mcmlter-clim_boym_15min-20250205.csv") |> 
+BOYM <- read_csv("~/Library/CloudStorage/OneDrive-UCB-O365/Documents/MCM-LTER_Met/met stations/mcmlter-clim_boym_15min-20250205.csv") |> 
   mutate(date_time = ymd_hms(date_time)) |> 
   filter(date_time > '2016-12-21 00:00:00')
 
-HOEM <- read_csv("~/Google Drive/My Drive/MCMLTER_Met/met stations/mcmlter-clim_hoem_15min-20250205.csv") |> 
+HOEM <- read_csv("~/Library/CloudStorage/OneDrive-UCB-O365/Documents/MCM-LTER_Met/met stations/mcmlter-clim_hoem_15min-20250205.csv") |> 
   mutate(date_time = ymd_hms(date_time)) |> 
   filter(date_time > '2016-12-21 00:00:00') |> 
   mutate(airtemp_3m_K = airtemp_3m_degc + 273.15)
 
-COHM <- read_csv("~/Google Drive/My Drive/MCMLTER_Met/met stations/mcmlter-clim_cohm_15min-20250205.csv") |> 
+COHM <- read_csv("~/Library/CloudStorage/OneDrive-UCB-O365/Documents/MCM-LTER_Met/met stations/mcmlter-clim_cohm_15min-20250205.csv") |> 
   mutate(date_time = ymd_hms(date_time)) |> 
   filter(date_time > '2016-12-21 00:00:00')
 
-TARM <- read_csv("~/Google Drive/My Drive/MCMLTER_Met/met stations/mcmlter-clim_tarm_15min-20250205.csv") |> 
+TARM <- read_csv("~/Library/CloudStorage/OneDrive-UCB-O365/Documents/MCM-LTER_Met/met stations/mcmlter-clim_tarm_15min-20250205.csv") |> 
   mutate(date_time = ymd_hms(date_time)) |> 
   filter(date_time > '2016-12-21 00:00:00') |> 
   mutate(airtemp_3m_K = airtemp_3m_degc + 273.15)
@@ -409,10 +409,10 @@ for (t_idx in 1:nrow(time_series)) {
   results$LW_net[t_idx] <- LW_net
   results$SW_abs[t_idx] <- SW_abs
   results$SW[t_idx] <- SW_in
-  results$sensible_Q <- Qh
-  results$latent_Q <- Ql
-  results$conductive_Q <- Qc
-  results$surface_heat_flux <- surface_flux
+  results$sensible_Q[t_idx] <- Qh
+  results$latent_Q[t_idx] <- Ql
+  results$conductive_Q[t_idx] <- Qc
+  results$surface_heat_flux[t_idx] <- surface_flux
   results$Iteration[t_idx] <- t_idx  
   
   #ice thickness
@@ -550,7 +550,7 @@ results |>
 
 ### pivot results dataframe for plotting of all the fluxes through time
 result_flux = results |> 
-  pivot_longer(cols = c(depth, temperature, thickness, LW_net, SW, SW_abs, sensible_Q, latent_Q, 
+  pivot_longer(cols = c(temperature, thickness, LW_net, SW, SW_abs, sensible_Q, latent_Q, 
                         conductive_Q, surface_heat_flux), 
                names_to = "flux", 
                values_to = "value")
@@ -559,13 +559,29 @@ ggplot(result_flux, aes(time, value, color = flux)) +
   geom_path() + 
   facet_wrap(~flux, scales = "free")
 
+## 
+results_year_max = results |> 
+  mutate(year = year(time), 
+         date = as.Date(time)) |> 
+  group_by(year) |> 
+  slice_max(order_by = thickness, n = 1) |> 
+  select(year, date) |> 
+  ungroup()
+
+results_year_min = results |> 
+  mutate(year = year(time), 
+         date = as.Date(time)) |> 
+  group_by(year) |> 
+  slice_min(order_by = thickness, n = 1) |> 
+  select(year, date) |> 
+  ungroup()
 
 #troubleshooting plots, to find distance of change at top and bottom
 plot(dL_bottom.vec)
 plot(dL_surface.vec)
 
 ####### Comparing outputs ##########
-setwd("/Users/charliedougherty/Documents/R-Repositories/MCM-LTER-MS")
+#setwd("/Users/charliedougherty/Documents/R-Repositories/MCM-LTER-MS")
 
 # load file
 GEE_corrected <- results |> 
