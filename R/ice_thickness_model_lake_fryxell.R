@@ -26,9 +26,6 @@ setwd("~chdo4929")
 
 ###################### Load Time Series Data by Station ######################
 # met station data can be found at the McMurdo Long Term Ecological Research website or on the Environmental Data Initiative
-#BOYM <- read_csv("~/Library/CloudStorage/OneDrive-UCB-O365/Documents/MCM-LTER_Met/met stations/mcmlter-clim_boym_15min-20250205.csv") |> 
-#  mutate(date_time = ymd_hms(date_time)) |> 
-#  filter(date_time > '2016-12-11 00:00:00')
 
 HOEM <- read_csv("~/Library/CloudStorage/OneDrive-UCB-O365/Documents/MCM-LTER_Met/met stations/mcmlter-clim_hoem_15min-20250205.csv") |> 
   mutate(date_time = ymd_hms(date_time)) |> 
@@ -239,14 +236,14 @@ relative_humidity <- FRLM |>
 ice_thickness <- read_csv("Data/mcmlter-lake-ice_thickness-20250218_0_2025.csv") |>
   mutate(date_time = mdy_hm(date_time), 
          z_water_m = z_water_m*-1) |> 
-  filter(location_name == "Lake Fryxell") |> 
+  filter(location_name == "Lake Fryxell" & 
+           str_starts(location, pattern = "O")) |> 
   filter(date_time > "2016-12-01" & date_time < "2024-02-01")
 
 
 ###################### ALBEDO DATA ######################
 # Load and prepare the data
 albedo_orig <- read_csv("Data/AlbedoModel.csv") |>  
-  # mutate(sediment = sediment_abundance) |> 
   filter(lake == "Lake Fryxell") |> 
   mutate(date = ymd(sed.date),  # or ymd() if no time data is present, adjust as needed
          month = month(sed.date), 
@@ -568,7 +565,8 @@ result_flux = results |>
 
 ggplot(result_flux, aes(time, value, color = flux)) + 
   geom_path() + 
-  facet_wrap(~flux, scales = "free")
+  facet_wrap(~flux, scales = "free") + 
+  theme_linedraw()
 
 ## 
 results_year_max = results |> 
@@ -606,10 +604,10 @@ summary(GEE_corrected$thickness)
 ice_thick <- read_csv("Data/mcmlter-lake-ice_thickness-20250218_0_2025.csv") |>
   mutate(date_time = mdy_hm(date_time), 
          z_water_m = z_water_m*-1) |> 
-  filter(location_name == "East Lake Bonney", 
+  filter(location_name == "Lake Fryxell", 
   ) |> 
-  filter(str_detect(string = location, pattern = "Inside")) |> 
-  filter(date_time > "2016-12-01" & date_time < "2025-02-01") |> 
+  filter(str_detect(string = location, pattern = "Outside")) |> 
+  filter(date_time > "2016-12-01" & date_time < "2024-02-01") |> 
   group_by(date_time) |> 
   summarize(mean_thickness = mean(z_water_m, na.rm = T))
 

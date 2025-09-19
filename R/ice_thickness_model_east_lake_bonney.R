@@ -356,7 +356,7 @@ series <- time_series |>
                names_to = "variable", values_to = "data")
 
 ggplot(series, aes(time, data)) + 
-  geom_line(size = 1.5) + 
+  geom_path(size = 0.5) + 
   xlab("Date") + ylab("Input Data") +
   facet_wrap(vars(variable), scales = "free") + 
   theme_linedraw(base_size = 15)
@@ -554,11 +554,12 @@ result_flux = results |>
   pivot_longer(cols = c(temperature, thickness, LW_net, SW, SW_abs, sensible_Q, latent_Q, 
                         conductive_Q, surface_heat_flux), 
                names_to = "flux", 
-               values_to = "value")
+               values_to = "value") 
 
 ggplot(result_flux, aes(time, value, color = flux)) + 
   geom_path() + 
-  facet_wrap(~flux, scales = "free")
+  facet_wrap(~flux, scales = "free") + 
+  theme_linedraw(base_size = 10)
 
 ## 
 results_year_max = results |> 
