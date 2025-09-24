@@ -561,23 +561,6 @@ ggplot(result_flux, aes(time, value, color = flux)) +
   facet_wrap(~flux, scales = "free") + 
   theme_linedraw(base_size = 10)
 
-## 
-results_year_max = results |> 
-  mutate(year = year(time), 
-         date = as.Date(time)) |> 
-  group_by(year) |> 
-  slice_max(order_by = thickness, n = 1) |> 
-  select(year, date) |> 
-  ungroup()
-
-results_year_min = results |> 
-  mutate(year = year(time), 
-         date = as.Date(time)) |> 
-  group_by(year) |> 
-  slice_min(order_by = thickness, n = 1) |> 
-  select(year, date) |> 
-  ungroup() |> print()
-
 #troubleshooting plots, to find distance of change at top and bottom
 plot(dL_bottom.vec)
 plot(dL_surface.vec)
@@ -614,9 +597,6 @@ ggplot() +
   ggtitle("East Lake Bonney Ice Thickness", 
           subtitle = "modeled vs. measured") +
   theme_linedraw(base_size = 20)
-
-#ggsave("plots/manuscript/chapter 2/measured_vs_modeled.png", 
-#       dpi = 300, height = 8, width = 12)
 
 modeled_daily <- GEE_corrected |> 
   mutate(time = ymd_hms(time), 
