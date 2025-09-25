@@ -559,7 +559,7 @@ result_flux = results |>
 ggplot(result_flux, aes(time, value, color = flux)) + 
   geom_path() + 
   facet_wrap(~flux, scales = "free") + 
-  theme_linedraw(base_size = 10)
+  theme_linedraw(base_size = 15)
 
 #troubleshooting plots, to find distance of change at top and bottom
 plot(dL_bottom.vec)
