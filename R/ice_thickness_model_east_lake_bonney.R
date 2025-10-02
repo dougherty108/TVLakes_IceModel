@@ -378,6 +378,8 @@ results <- tibble(
   latent_Q = numeric(n_iterations), 
   conductive_Q = numeric(n_iterations),
   surface_heat_flux = numeric(n_iterations),
+  surface_loss = numeric(n_iterations),
+  bottom_gain = numeric(n_iterations),
   Iteration = numeric(n_iterations)          # Initialize `Iteration` as numeric
 )
 
@@ -413,6 +415,8 @@ for (t_idx in 1:nrow(time_series)) {
   results$latent_Q[t_idx] <- Ql
   results$conductive_Q[t_idx] <- Qc
   results$surface_heat_flux[t_idx] <- surface_flux
+  results$surface_loss[t_idx] <- dL_surface
+  results$bottom_gain[t_idx] <- dL_bottom
   results$Iteration[t_idx] <- t_idx  
   
   #ice thickness
@@ -552,7 +556,7 @@ results |>
 ### pivot results dataframe for plotting of all the fluxes through time
 result_flux = results |> 
   pivot_longer(cols = c(temperature, thickness, LW_net, SW, SW_abs, sensible_Q, latent_Q, 
-                        conductive_Q, surface_heat_flux), 
+                        conductive_Q, surface_heat_flux, surface_loss, bottom_gain), 
                names_to = "flux", 
                values_to = "value") 
 
