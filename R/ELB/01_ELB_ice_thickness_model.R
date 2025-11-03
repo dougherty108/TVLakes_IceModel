@@ -24,7 +24,7 @@ source("R/ELB/00_ELB_data_preparation.R")
 
 ###################### PLOT INPUT DATA ######################
 # plot input data to check for funny business
-series <- time_series |> 
+series <- arti_time_series |> 
   pivot_longer(cols = c(T_air, SW_in, LWR_in, LWR_out, pressure, albedo, relative_humidity, wind), 
                names_to = "variable", values_to = "data")
 
@@ -36,6 +36,7 @@ ggplot(series, aes(time, data)) +
 
 
 ###################### MODEL BEGINS ######################
+nt <- (1/dt)*16*365.   # adjust as needed
 n_iterations <- nt
 
 # Initialize results tibble

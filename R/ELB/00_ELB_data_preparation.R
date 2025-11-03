@@ -329,3 +329,48 @@ time_series <- tibble(
   relative_humidity = relative_humidity_interp # relative humidity
 ) |> 
   drop_na(delta_T) # removes the first row where the difference in temperatures yields NA
+
+###### optional step, start doing some forecasting into the future, using the input data as artificial data for the future
+
+# step one, average each parameter, grouping by doy and timestamp, to create an artificial meteorological data at a year length
+
+artificial_time_series = time_series |> 
+  mutate(
+    month  = month(time),
+    day    = day(time),
+    hour   = hour(time),
+    minute = minute(time)
+  ) %>%
+  group_by(month, day, hour, minute) %>%
+  summarise(T_air = mean(T_air),
+            SW_in = mean(SW_in),
+            LWR_in = mean(LWR_in),                      
+            LWR_out = mean(LWR_out),                  
+            albedo = mean(albedo),
+            pressure = mean(pressure),                 
+            wind = mean(wind),                         
+            delta_T = mean(delta_T),                
+            relative_humidity = mean(relative_humidity),
+            .groups = "drop")
+
+artificial_time_series <- artificial_time_series %>%
+  mutate(
+    time = make_datetime(
+      year = 2025, month = month, day = day, hour = hour, min = minute, tz = "UTC"
+    )
+  ) %>%
+  arrange(time) %>%
+  select(time, T_air, SW_in, LWR_in, LWR_out, albedo, pressure, wind, delta_T, relative_humidity)
+
+#pick what years you want to timestamp stuff as
+years_to_repeat <- 2024:2040
+
+#copy each year over and over
+arti_time_series <- bind_rows(lapply(years_to_repeat, function(y) {
+  artificial_time_series %>%
+    mutate(time = update(time, year = !!y))
+}))
+
+
+
+
