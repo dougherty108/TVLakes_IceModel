@@ -25,19 +25,19 @@ source("R/ELB/00_ELB_data_preparation.R")
 ###################### PLOT INPUT DATA ######################
 # plot input data to check for funny business
 #rename depending on which scenario you are plugging in
-time_series = time_series_total
 
-time_series <- time_series %>%
+time_series <- time_series_total %>%
   # assume you have all years present
   mutate(year = as.integer(year(time)), 
-         month = as.integer(month(time))) %>%
+         month = as.integer(month(time)), 
+         temp_air = T_air) %>%
   arrange(year, month) %>%
   group_by(year) %>%
-  mutate(warming_rate = runif(1, 0.01, 0.05)) %>%
+  mutate(warming_rate = 0.0025) %>%
   ungroup() %>%
   mutate(
     cum_mult = cumprod(1 + warming_rate[!duplicated(year)])[match(year, unique(year))],
-    temp_warmed = if_else(month %in% 2:9, T_air * cum_mult, T_air)
+    T_air = if_else(month %in% 2:9, temp_air * cum_mult, T_air)
   )
 
 
