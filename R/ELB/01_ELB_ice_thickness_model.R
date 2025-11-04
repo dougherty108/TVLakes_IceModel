@@ -24,7 +24,27 @@ source("R/ELB/00_ELB_data_preparation.R")
 
 ###################### PLOT INPUT DATA ######################
 # plot input data to check for funny business
-series <- arti_time_series |> 
+#rename depending on which scenario you are plugging in
+time_series = time_series_total
+
+time_series <- time_series %>%
+  # assume you have all years present
+  mutate(year = as.integer(year(time)), 
+         month = as.integer(month(time))) %>%
+  arrange(year, month) %>%
+  group_by(year) %>%
+  mutate(warming_rate = runif(1, 0.01, 0.05)) %>%
+  ungroup() %>%
+  mutate(
+    cum_mult = cumprod(1 + warming_rate[!duplicated(year)])[match(year, unique(year))],
+    temp_warmed = if_else(month %in% 2:9, T_air * cum_mult, T_air)
+  )
+
+
+
+L_initial <- 3.88       # Initial ice thickness (m) Ice thickness at 12/17/2016 ice to ice
+
+series <- time_series |> 
   pivot_longer(cols = c(T_air, SW_in, LWR_in, LWR_out, pressure, albedo, relative_humidity, wind), 
                names_to = "variable", values_to = "data")
 
@@ -36,7 +56,7 @@ ggplot(series, aes(time, data)) +
 
 
 ###################### MODEL BEGINS ######################
-nt <- (1/dt)*16*365.   # adjust as needed
+nt <- (1/dt)*24*365.   # adjust as needed
 n_iterations <- nt
 
 # Initialize results tibble

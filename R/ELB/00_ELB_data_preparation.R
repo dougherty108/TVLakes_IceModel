@@ -372,5 +372,8 @@ arti_time_series <- bind_rows(lapply(years_to_repeat, function(y) {
 }))
 
 
-
-
+time_series_total = time_series |> 
+  bind_rows(arti_time_series) |> 
+  mutate(month = month(time), 
+         day = (time)) |> 
+  filter(month != 2 & day != 29) # remove leap days
