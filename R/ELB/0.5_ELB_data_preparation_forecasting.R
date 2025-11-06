@@ -29,7 +29,7 @@ L_initial <- 3.88       # Initial ice thickness (m) Ice thickness at 12/17/2016 
 dx <- 0.10             # Spatial step size (m)
 nx = L_initial/dx       # Number of spatial steps
 dt <-  1/24             # Time step for stability (in days)
-nt <- (1/dt)*6.95*365.   # Number of time steps
+nt <- (1/dt)*24*365.   # Number of time steps
 
 # Stability check: Ensure R < 0.5 for stability
 r <- alpha * (dt * 86400) / dx^2  # dt is in days, so multiply by 86400 to convert to seconds
@@ -316,7 +316,7 @@ if (length(airt_interp) != length(time_model) |
 
 
 ###################### Create the time series tibble for model time ######################
-time_series <- tibble(
+time_series_interp <- tibble(
   time = time_model,                           # Model time steps
   T_air = airt_interp,                         # Interpolated air temperature Kelvin
   SW_in = sw_interp,                           # Interpolated shortwave radiation w/m2
@@ -328,6 +328,119 @@ time_series <- tibble(
   delta_T = T_air - lag(T_air),                # difference in air temperature, for later flux calculation
   relative_humidity = relative_humidity_interp # relative humidity
 ) |> 
-  drop_na(delta_T) # removes the first row where the difference in temperatures yields NA
+  drop_na(delta_T)  # removes the first row where the difference in temperatures yields NA
 
+##### 
+# How many extensions to add
+n_repeat <- 3
+
+# Find start and end dates
+start_date <- min(time_series_interp$time)
+end_date <- max(time_series_interp$time)
+
+# Duration of the dataset
+duration <- as.numeric(difftime(end_date, start_date, units = "days")) + 1
+
+time_series_extended <- time_series_interp
+
+for (i in 1:n_repeat) {
+  df_next <- time_series_interp %>%
+    mutate(time = time + i * duration)
+  
+  time_series_extended <- bind_rows(time_series_extended, df_next)
+}
+
+range(time_series_extended$time)
+
+
+SW_daily = time_series_interp %>%
+  mutate(date = as.Date(time)) %>%
+  group_by(date) %>%
+  summarise(
+    kWh_m2_day = sum(SW_in * 0.001, na.rm = TRUE)  # hourly W/m² → kWh/m²/day
+  )
+
+
+# delete later, needed monthly averages for cmapbell power budgets
+
+df_monthly <- SW_daily %>%
+  mutate(month = month(date)) %>%
+  group_by(month) %>%
+  summarise(
+    mean_kWh_m2_day = mean(kWh_m2_day, na.rm = TRUE)
+  ) |> 
+  print()
+
+
+
+SW_temp_summary = time_series_interp |> 
+  mutate(month = month(time)) |> 
+  group_by(month) |> 
+  summarize(mean_SW = mean(SW_in), 
+            mean_T = mean(T_air) - 273.15) |> 
+  print()
+  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+###### optional step, start doing some forecasting into the future, using the input data as artificial data for the future
+
+# step one, average each parameter, grouping by doy and timestamp, to create an artificial meteorological data at a year length
+
+artificial_time_series = time_series_interp |> 
+  mutate(
+    month  = month(time),
+    day    = day(time),
+    hour   = hour(time),
+    minute = minute(time)
+  ) %>%
+  group_by(month, day, hour, minute) %>%
+  summarise(T_air = median(T_air),
+            SW_in = median(SW_in),
+            LWR_in = median(LWR_in),                      
+            LWR_out = median(LWR_out),                  
+            albedo = median(albedo),
+            pressure = median(pressure),                 
+            wind = median(wind),                         
+            delta_T = median(delta_T),                
+            relative_humidity = median(relative_humidity),
+            .groups = "drop")
+
+artificial_time_series <- artificial_time_series %>%
+  mutate(
+    time = make_datetime(
+      year = 2025, month = month, day = day, hour = hour, min = minute, tz = "UTC"
+    )
+  ) %>%
+  arrange(time) %>%
+  select(time, T_air, SW_in, LWR_in, LWR_out, albedo, pressure, wind, delta_T, relative_humidity)
+
+#pick what years you want to timestamp stuff as
+years_to_repeat <- 2024:2040
+
+#copy each year over and over
+arti_time_series <- bind_rows(lapply(years_to_repeat, function(y) {
+  artificial_time_series %>%
+    mutate(time = update(time, year = !!y))
+}))
+
+
+time_series_total = time_series_interp |> 
+  bind_rows(arti_time_series) |> 
+  mutate(month = month(time), 
+         day = (time)) |> 
+  filter(month != 2 & day != 29) # remove leap days
 

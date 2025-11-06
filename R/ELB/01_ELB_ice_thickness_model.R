@@ -19,6 +19,7 @@ library(lubridate)
 library(progress)
 library(suncalc) # might not need this one here
 
+
 # call the data preparation script
 source("R/ELB/00_ELB_data_preparation.R")
 
@@ -30,16 +31,21 @@ time_series <- time_series_total %>%
   # assume you have all years present
   mutate(year = as.integer(year(time)), 
          month = as.integer(month(time)), 
-         temp_air = T_air) %>%
+         temp_air = T_air, 
+         sw = SW_in) %>%
   arrange(year, month) %>%
   group_by(year) %>%
-  mutate(warming_rate = 0.0025) %>%
+  mutate(warming_rate = 0.0015) %>%
   ungroup() %>%
   mutate(
     cum_mult = cumprod(1 + warming_rate[!duplicated(year)])[match(year, unique(year))],
-    T_air = if_else(month %in% 2:9, temp_air * cum_mult, T_air)
+    T_air = if_else(month %in% 2:9 & year > 2024, temp_air * cum_mult, T_air), 
+    #SW_in = if_else(month %in% 2:9, sw * cum_mult, SW_in), 
+    SW_in = sw
   )
 
+# or if you selected your changes in the data prep side: 
+time_series = time_series_total
 
 
 L_initial <- 3.88       # Initial ice thickness (m) Ice thickness at 12/17/2016 ice to ice
@@ -56,7 +62,7 @@ ggplot(series, aes(time, data)) +
 
 
 ###################### MODEL BEGINS ######################
-nt <- (1/dt)*24*365.   # adjust as needed
+nt <- (1/dt)*6.95*365.   # adjust as needed
 n_iterations <- nt
 
 # Initialize results tibble
@@ -218,7 +224,6 @@ for (t_idx in 1:nrow(time_series)) {
   
   # Adjust spatial resolution if thickness changes
   if (newL > 0) {
-    # nx <- 30  # Ensure at least 15 layers
     dx <- 0.1  # Recalculate spatial step size
     newdepth <- seq(0, newL, by = dx)  # Update depth values
     newT <- approx(seq(0, prevL, length.out = length(depth)), newT, seq(0, newL, length.out = length(newdepth)), rule = 2)$y  # Interpolate
@@ -244,5 +249,6 @@ results |>
   labs(x = "Time", y = "Ice Thickness (m)"
   ) +
   geom_point(data = ice_thickness, aes(x = date_time, y = z_water_m)) + 
-  ggtitle("East Lake Bonney") +
+  ggtitle("East Lake Bonney", 
+          subtitle = "selecting max temp, SW, wind") +
   theme_linedraw(base_size = 20)
