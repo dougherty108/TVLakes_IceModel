@@ -330,117 +330,409 @@ time_series_interp <- tibble(
 ) |> 
   drop_na(delta_T)  # removes the first row where the difference in temperatures yields NA
 
-##### 
-# How many extensions to add
-n_repeat <- 3
 
-# Find start and end dates
-start_date <- min(time_series_interp$time)
-end_date <- max(time_series_interp$time)
+######################### Synthentic Meteorological Dataset Creation ############################
 
-# Duration of the dataset
-duration <- as.numeric(difftime(end_date, start_date, units = "days")) + 1
+# Synthetic multivariate climate time series using VAR + residual bootstrap
+# Input expected: a tibble named `time_series_interp` with columns:
+# time, T_air (K), SW_in, LWR_in, LWR_out, albedo, pressure (Pa), wind (m/s), delta_T, relative_humidity
+#
+# Author: ChatGPT
+# Date: 11/6/2025
+#
+# Required packages:
+required_pkgs <- c("tidyverse","lubridate","zoo","vars","copula","ggplot2","reshape2","gridExtra","scales")
+new_pkgs <- required_pkgs[!(required_pkgs %in% installed.packages()[,"Package"])]
+if(length(new_pkgs)) install.packages(new_pkgs)
+library(tidyverse); library(lubridate); library(zoo); library(vars)
+library(copula); library(ggplot2); library(reshape2); library(gridExtra); library(scales)
 
-time_series_extended <- time_series_interp
+# ---------------------------
+# 1. Prepare and sanity-check
+# ---------------------------
+# Ensure your tibble is present
+if(!exists("time_series_interp")) stop("time_series_interp object not found. Please load it before running this script.")
 
-for (i in 1:n_repeat) {
-  df_next <- time_series_interp %>%
-    mutate(time = time + i * duration)
-  
-  time_series_extended <- bind_rows(time_series_extended, df_next)
+df <- time_series_interp %>%
+  arrange(time) %>%
+  mutate(time = as.POSIXct(time, tz = "UTC")) # adjust tz if needed
+
+# Check for NA's and optionally interpolate or remove (here we stop if many NA)
+na_count <- sum(is.na(df))
+message("Total NA values in dataset: ", na_count)
+if(na_count > 0) {
+  message("You have NA values. It's recommended to fill or remove them before modelling.")
+  # simple linear interpolation for small gaps (uncomment to enable):
+  # df <- df %>% mutate(across(where(is.numeric), ~ na.approx(., x = time, na.rm = FALSE)))
 }
 
-range(time_series_extended$time)
+# ---------------------------
+# 2. Transform variables
+# ---------------------------
+eps <- 1e-6
+logit <- function(x) { qlogis(pmin(pmax(x, eps), 1 - eps)) }
+inv_logit <- function(x) { plogis(x) }
 
-
-SW_daily = time_series_interp %>%
-  mutate(date = as.Date(time)) %>%
-  group_by(date) %>%
-  summarise(
-    kWh_m2_day = sum(SW_in * 0.001, na.rm = TRUE)  # hourly W/m² → kWh/m²/day
+df_trans <- df %>%
+  mutate(
+    # convert RH from percent to fraction & clamp
+    relative_humidity_frac = relative_humidity / 100,
+    relative_humidity_frac = pmin(pmax(relative_humidity_frac, 0.0001), 0.9999),
+    
+    # convert to logit scale
+    rh_t = qlogis(relative_humidity_frac),
+    
+    # albedo 0–1 clamp and logit
+    albedo_clamped = pmin(pmax(albedo, 0.0001), 0.9999),
+    albedo_t = qlogis(albedo_clamped),
+    
+    # wind transform
+    wind_t = sqrt(pmax(wind, 0)),
+    
+    # leave radiative + temperature + pressure mostly untouched
+    T_air_t = T_air,
+    SW_in_t  = SW_in,
+    LWR_in_t = LWR_in,
+    pressure_t = pressure
+  ) %>%
+  dplyr::select(
+    time,
+    T_air_t, SW_in_t, LWR_in_t,
+    albedo_t, pressure_t, wind_t, rh_t
   )
 
 
-# delete later, needed monthly averages for cmapbell power budgets
 
-df_monthly <- SW_daily %>%
-  mutate(month = month(date)) %>%
-  group_by(month) %>%
+# ---------------------------
+# 3. Compute seasonal cycle (hour of day + day of year) and anomalies
+# ---------------------------
+# We'll compute a seasonal climatology by (hour-of-day, day-of-year) to capture diurnal + annual
+df_trans <- df_trans %>%
+  mutate(
+    hour = hour(time),
+    doy = yday(time)
+  )
+
+# compute mean seasonal cycle for each variable as mean over (doy, hour)
+vars_t <- c("T_air_t","SW_in_t","LWR_in_t","albedo_t","pressure_t","wind_t","rh_t")
+
+seasonal_means <- df_trans %>%
+  mutate(
+    doy = yday(time),
+    hour = hour(time)
+  ) %>%
+  group_by(doy, hour) %>%      # <--- IMPORTANT CHANGE
   summarise(
-    mean_kWh_m2_day = mean(kWh_m2_day, na.rm = TRUE)
-  ) |> 
-  print()
+    T_air_t_seasonal    = mean(T_air_t, na.rm = TRUE),
+    SW_in_t_seasonal    = mean(SW_in_t, na.rm = TRUE),
+    LWR_in_t_seasonal   = mean(LWR_in_t, na.rm = TRUE),
+    albedo_t_seasonal   = mean(albedo_t, na.rm = TRUE),
+    pressure_t_seasonal = mean(pressure_t, na.rm = TRUE),
+    wind_t_seasonal     = mean(wind_t, na.rm = TRUE),
+    rh_t_seasonal       = mean(rh_t, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# join back to get anomalies
+df_anom <- df_trans %>%
+  left_join(seasonal_means, by = c("doy","hour"), suffix = c("","_seas")) %>%
+  mutate(across(all_of(vars_t), ~ . - get(paste0(cur_column(), "_seas")), .names = "anom_{col}"))
+
+# Build matrix of anomalies for VAR
+anom_names <- paste0("anom_", vars_t)
+Y <- df_anom %>%
+  dplyr::select(all_of(anom_names)) %>%
+  as.matrix()
+
+# remove rows with any NA in Y
+na_rows <- apply(Y, 1, function(x) any(is.na(x)))
+if(any(na_rows)) {
+  warning(sum(na_rows), " rows contain NA in anomalies. These will be removed for VAR fitting.")
+  Y_fit <- Y[!na_rows, ]
+  df_fit <- df_anom[!na_rows, ]
+} else {
+  Y_fit <- Y
+  df_fit <- df_anom
+}
+
+# ---------------------------
+# 4. Fit VAR (select lag)
+# ---------------------------
+max_lag <- 48  # adjust depending on data frequency / memory (48 for up to 2-day memory if hourly)
+lag_sel <- VARselect(Y_fit, lag.max = max_lag, type = "const")
+message("Lag selection results:"); print(lag_sel$selection)
+
+p_choice <- as.integer(lag_sel$selection["AIC(n)"])  # choose AIC-selected lag
+if(is.na(p_choice)) p_choice <- 1
+message("Selected VAR lag p = ", p_choice)
+
+var_model <- VAR(Y_fit, p = p_choice, type = "const")
+summary(var_model)
+
+# Extract residuals (for bootstrap) and their covariance
+resids <- residuals(var_model)   # matrix (n_obs - p) x nvars
+Sigma_res <- cov(resids, use = "pairwise.complete.obs")
+
+# ---------------------------
+# 5. Synthetic simulation function
+#    - recursive using model coefficients and bootstrap sampling of residuals
+# ---------------------------
+simulate_VAR_bootstrap <- function(var_model, n_sim, init_y = NULL, resids = NULL, seed = NULL) {
+  # var_model: fitted VAR object (vars::VAR)
+  # n_sim: number of steps to simulate
+  # init_y: initial p observations matrix (p x nvar). If NULL, use last p from model data
+  # resids: matrix of residuals to bootstrap from
+  # returns: matrix n_sim x nvar synthetic anomalies
+  if(!is.null(seed)) set.seed(seed)
+  p <- var_model$p
+  k <- ncol(var_model$y)   # number of variables
+  coefs_list <- var_model$varresult
+  # Build coefficient arrays:
+  # companion style easier to apply: we will extract coef matrices A1..Ap and const
+  A_mats <- array(0, dim = c(k,k,p))
+  const_vec <- numeric(k)
+  for(i in seq_len(k)) {
+    co <- coef(coefs_list[[i]])
+    # names are like "const", "L1.var1", etc
+    const_vec[i] <- co["const"]
+    # extract lag coefficients for this equation
+    for(l in 1:p) {
+      # coef names for lag l: paste0("L",l,".", var names)
+      lag_names <- paste0("L", l, ".", colnames(var_model$y))
+      A_mats[i,,l] <- co[lag_names]
+    }
+  }
+  # transpose A_mats to have A_l matrices of shape k x k
+  A_list <- lapply(1:p, function(l) t(A_mats[,,l]))
+  # initial values
+  if(is.null(init_y)) {
+    # get last p observations used in fit
+    Y_full <- var_model$y  # matrix used in fit (nobs x k)
+    init_indices <- (nrow(Y_full) - p + 1):nrow(Y_full)
+    init_y <- Y_full[init_indices, , drop = FALSE]
+  }
+  if(is.null(resids)) stop("resids (bootstrap residuals) must be provided")
+  # Prepare storage
+  Ysim <- matrix(0, nrow = n_sim, ncol = k)
+  # rolling state: store last p observations, newest last row
+  state <- init_y
+  for(t in 1:n_sim) {
+    # deterministic part
+    mu_t <- const_vec
+    for(l in 1:p) {
+      mu_t <- mu_t + A_list[[l]] %*% state[nrow(state) - (l-1), ]
+    }
+    # sample residual
+    e_t <- resids[sample(nrow(resids), 1), ]
+    new_y <- as.vector(mu_t + e_t)
+    # append
+    Ysim[t, ] <- new_y
+    # update state: drop first, append new
+    if(p > 1) state <- rbind(state[-1, , drop = FALSE], new_y) else state <- matrix(new_y, nrow=1)
+  }
+  colnames(Ysim) <- colnames(var_model$y)
+  return(Ysim)
+}
+
+# decide simulation length
+n_obs <- nrow(df)   # produce same length as original by default
+n_sim <- n_obs
+
+library(MTS)
+
+# Suppose you have k variables and p lags
+k <- ncol(df_var)
+p <- lag_order
+
+sim_data <- VARMAsim(n = n_steps, ar = lapply(1:p, function(i) coef(var_model)[[i]]),
+                     sigma = cov(residuals(var_model)))
+
+sim_anom <- as.data.frame(sim_data$series)
+colnames(sim_anom) <- colnames(df_var)
 
 
+# If you prefer Gaussian residuals, you can generate with mvrnorm:
+# sim_anom_gauss <- simulate_VAR_gaussian(...)  (not implemented here)
 
-SW_temp_summary = time_series_interp |> 
-  mutate(month = month(time)) |> 
-  group_by(month) |> 
-  summarize(mean_SW = mean(SW_in), 
-            mean_T = mean(T_air) - 273.15) |> 
-  print()
-  
+# ---------------------------
+# 6. Reconstruct physical variables
+# ---------------------------
+# sim_anom is n_sim x k with column names matching var_model$y (which matches var names in Y_fit)
+# We need to map them back to original rows with seasonal cycle and inverse transforms.
 
+# Build a tibble to hold simulated anomalies aligned to the original df rows
+sim_anom_df <- as_tibble(sim_anom)
+# Ensure ordering of columns corresponds to anom_names; var_model$y column names might be the same
+# var_model$y colnames should be anom_names; check:
+if(!all(colnames(var_model$y) %in% anom_names)) {
+  warning("VAR column names differ from expected anomaly names. Attempting to align by position.")
+}
 
+# We'll take the same time index as df (even if some rows were removed during fitting).
+# For rows that were excluded (NA rows), we'll fill with NA or simulated values — simplest: return full-length sim by aligning indices.
+sim_full <- df_anom %>%
+  dplyr::select(time, doy, hour) %>%
+  mutate(row_id = row_number()) %>%
+  # attach simulated anomalies in order (if df had NA rows removed during fit, simulation used contiguous fit rows)
+  mutate(sim_index = row_number())  # one-to-one
 
+# If we removed rows during VAR fitting, we must align simulated output with original df rows:
+if(any(na_rows)) {
+  # we simulated n_sim = nrow(df), but the VAR used only rows where !na_rows; our simulate_VAR_bootstrap used init from fitted data and
+  # simulated n_sim steps; to be cautious, we'll take the first n_sim simulated rows and map them to the original time order.
+  # For simplicity, map sequentially: (user can refine if they want strict mapping)
+  # Attach by position:
+  sim_full <- sim_full %>%
+    bind_cols(as_tibble(sim_anom)[1:nrow(sim_full), , drop = FALSE])
+} else {
+  sim_full <- sim_full %>%
+    bind_cols(as_tibble(sim_anom)[1:nrow(sim_full), , drop = FALSE])
+}
 
+# Now add back seasonal means for each variable
+# bring seasonal_means into sim_full by (doy,hour)
+sim_full <- sim_full %>%
+  left_join(seasonal_means, by = c("doy","hour"))
 
+# For each variable, compute simulated physical value = anomaly_sim + seasonal_mean
+# anom names are anom_<var>
+recon <- sim_full
+for(v in vars_t) {
+  anom_col <- paste0("anom_", v)
+  seas_col <- paste0(v, "_seasonal")   # seasonal_means columns used suffix "_seas" earlier
+  out_col  <- paste0(v, "_sim_recon")
+  # the seasonal mean column exists as column named like "T_air_t_seas" in sim_full
+  recon[[out_col]] <- recon[[anom_col]] + recon[[seas_col]]
+}
 
+# Now invert transforms to original physical variables
+# recall transforms:
+# rh_t = logit(relative_humidity)  -> inv_logit
+# albedo_t = logit(albedo) -> inv_logit
+# wind_t = sqrt(wind) -> square
+# T_air_t was unchanged
 
+# Create final synthetic tibble
+sigma_sb <- 5.670374419e-8  # Stefan-Boltzmann constant
 
+synthetic <- tibble(
+  time = recon$time,
+  T_air = recon$T_air_t_sim_recon,      # Kelvin
+  SW_in = recon$SW_in_t_sim_recon,
+  LWR_in = recon$LWR_in_t_sim_recon,
+  #LWR_out_raw = recon$LWR_out_t_sim_recon,  # we'll optionally replace with physics-based calc below
+  albedo = pmin(pmax(inv_logit(recon$albedo_t_sim_recon), 0), 1),
+  pressure = recon$pressure_t_sim_recon,
+  wind = (recon$wind_t_sim_recon)^2,     # inverse sqrt -> square
+  relative_humidity = pmin(pmax(inv_logit(recon$rh_t_sim_recon), 0), 1)
+) %>% mutate(
+  # delta_T relative to previous time
+  delta_T = T_air - lag(T_air)
+)
 
+# ---------------------------
+# 7. (Optional) Recompute LWR_out physically for thermodynamic consistency
+#    Use emissivity estimated from original data: emissivity = mean(LWR_out / (sigma * T^4))
+#    Then recompute LWR_out_sim = emissivity * sigma * T_sim^4
+# ---------------------------
+orig_emissivity <- mean((df$LWR_out) / (sigma_sb * (df$T_air)^4), na.rm = TRUE)
+message("Estimated mean emissivity from original data: ", signif(orig_emissivity,4))
+# limit emissivity to sensible bounds
+orig_emissivity <- pmin(pmax(orig_emissivity, 0.4), 1.0)
 
-
-
-
-
-
-
-###### optional step, start doing some forecasting into the future, using the input data as artificial data for the future
-
-# step one, average each parameter, grouping by doy and timestamp, to create an artificial meteorological data at a year length
-
-artificial_time_series = time_series_interp |> 
+synthetic <- synthetic %>%
   mutate(
-    month  = month(time),
-    day    = day(time),
-    hour   = hour(time),
-    minute = minute(time)
-  ) %>%
-  group_by(month, day, hour, minute) %>%
-  summarise(T_air = median(T_air),
-            SW_in = median(SW_in),
-            LWR_in = median(LWR_in),                      
-            LWR_out = median(LWR_out),                  
-            albedo = median(albedo),
-            pressure = median(pressure),                 
-            wind = median(wind),                         
-            delta_T = median(delta_T),                
-            relative_humidity = median(relative_humidity),
-            .groups = "drop")
+    LWR_out = orig_emissivity * sigma_sb * (T_air)^4
+  )
 
-artificial_time_series <- artificial_time_series %>%
+# We keep LWR_out computed physically, but keep the raw simulated as well if you want to compare:
+#synthetic <- synthetic %>% relocate(LWR_out_raw, .after = LWR_out)
+
+# ---------------------------
+# 8. Enforce simple physical constraints
+# ---------------------------
+synthetic <- synthetic %>%
   mutate(
-    time = make_datetime(
-      year = 2025, month = month, day = day, hour = hour, min = minute, tz = "UTC"
-    )
-  ) %>%
-  arrange(time) %>%
-  select(time, T_air, SW_in, LWR_in, LWR_out, albedo, pressure, wind, delta_T, relative_humidity)
+    albedo = pmin(pmax(albedo, 0), 1),
+    relative_humidity = pmin(pmax(relative_humidity, 0), 1),
+    wind = pmax(wind, 0),
+    pressure = pmax(pressure, 1)  # ensure positive (Pa)
+  )
 
-#pick what years you want to timestamp stuff as
-years_to_repeat <- 2024:2040
+# ---------------------------
+# 9. Quick diagnostics & plots
+# ---------------------------
+# Combine original and synthetic
+plot_vars <- c("T_air","SW_in","LWR_in","LWR_out","albedo","wind","relative_humidity")
 
-#copy each year over and over
-arti_time_series <- bind_rows(lapply(years_to_repeat, function(y) {
-  artificial_time_series %>%
-    mutate(time = update(time, year = !!y))
-}))
+orig_plot_df <- df %>%
+  dplyr::select(time, all_of(plot_vars)) %>%
+  pivot_longer(-time, names_to = "variable", values_to = "value") %>%
+  mutate(source = "orig")
 
+synth_plot_df <- synthetic %>%
+  dplyr::select(time, all_of(plot_vars)) %>%
+  pivot_longer(-time, names_to = "variable", values_to = "value") %>%
+  mutate(source = "synth")
 
-time_series_total = time_series_interp |> 
-  bind_rows(arti_time_series) |> 
-  mutate(month = month(time), 
-         day = (time)) |> 
-  filter(month != 2 & day != 29) # remove leap days
+combined_df <- bind_rows(orig_plot_df, synth_plot_df)
 
+# Split by variable
+plot_list <- lapply(unique(combined_df$variable), function(var_name) {
+  df_sub <- combined_df %>% filter(variable == var_name)
+  ggplot(df_sub, aes(x = value, fill = source, colour = source)) +
+    geom_density(alpha = 0.2, size = 0.5) +
+    ggtitle(var_name) +
+    theme_minimal()
+})
+
+# Show first 4 density plots
+library(gridExtra)
+grid.arrange(grobs = plot_list[1:4], ncol = 2)
+
+# ACF for T_air original vs synthetic
+acf_orig <- acf(na.omit(df$T_air), plot = FALSE)
+acf_synth <- acf(na.omit(synthetic$T_air), plot = FALSE)
+# You can plot these in RStudio etc.; we'll produce a simple overlay plot using ggplot
+acf_df <- tibble(lag = acf_orig$lag, orig = acf_orig$acf, synth = acf_synth$acf) %>%
+  pivot_longer(-lag, names_to = "series", values_to = "acf")
+ggplot(acf_df, aes(x = lag, y = acf, colour = series)) + geom_line() + ggtitle("ACF: T_air original vs synthetic")
+
+# Cross-correlation heatmap (original vs synthetic) using Pearson cor across variables
+orig_mat <- df %>% select(all_of(plot_vars)) %>% drop_na() %>% as.matrix()
+synth_mat <- synthetic %>% select(all_of(plot_vars)) %>% drop_na() %>% as.matrix()
+cor_orig <- cor(orig_mat, use = "pairwise.complete.obs")
+cor_synth <- cor(synth_mat, use = "pairwise.complete.obs")
+
+m1 <- melt(cor_orig); names(m1) <- c("Var1","Var2","Corr"); m1$source <- "orig"
+m2 <- melt(cor_synth); names(m2) <- c("Var1","Var2","Corr"); m2$source <- "synth"
+m_comb <- bind_rows(m1,m2)
+
+ggplot(m_comb, aes(x = Var1, y = Var2, fill = Corr)) +
+  geom_tile() + facet_wrap(~source) +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", limits = c(-1,1)) +
+  theme_minimal() + theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle("Correlation matrices: original vs synthetic")
+
+# ---------------------------
+# 10. Save output
+# ---------------------------
+# final synthetic tibble is `synthetic`
+# attach to workspace and optionally save to disk:
+assign("synthetic_time_series", synthetic, envir = .GlobalEnv)
+message("Created 'synthetic_time_series' tibble in the global environment.")
+# write csv if desired
+# write_csv(synthetic, "synthetic_time_series.csv")
+
+# ---------------------------
+# Notes & next steps
+# ---------------------------
+# - The script uses residual bootstrap to retain non-Gaussian residual behaviour.
+# - If you want to better preserve tail dependencies across variables, consider:
+#     * fitting a copula to VAR residuals and sampling from that copula
+#     * running the VAR on principal components, or combining VAR + copula on marginals
+# - If your data have trends or nonstationarity, consider differencing or VECM instead of VAR.
+# - If you need conditional scenarios (e.g., force warmer mean), add a shift to seasonal means before reconstruction.
+# - If you want multiple ensemble members, call simulate_VAR_bootstrap multiple times with different seeds.
+#
+# End of script
