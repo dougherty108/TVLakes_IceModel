@@ -128,7 +128,7 @@ max_lag <- 12  # adjust depending on data frequency / memory (48 for up to 2-day
 lag_sel <- VARselect(Y_fit, lag.max = max_lag, type = "const")
 message("Lag selection results:"); print(lag_sel$selection)
 
-p_choice <- as.integer(lag_sel$selection["HQ(n)"])  # choose AIC-selected lag
+p_choice <- as.integer(lag_sel$selection["AIC(n)"])  # choose AIC-selected lag
 if(is.na(p_choice)) p_choice <- 1
 message("Selected VAR lag p = ", p_choice)
 
@@ -494,23 +494,101 @@ assign("synthetic_fixed", synthetic_fixed, envir = .GlobalEnv)
 message("synthetic_fixed created (clamped SW, QM T_air).")
 # ---------- End patch ----------
 
+# ----------------------------
+# Align sim_anom -> full df_anom -> apply QM -> rebuild T_air
+# ----------------------------
 
+# 1) Determine columns in common between sim_anom and df_anom
+common_cols <- intersect(colnames(sim_anom), colnames(df_anom))
+if(length(common_cols) == 0) {
+  # If df_anom uses 'anom_T_air_t' naming and sim_anom uses it too, they will intersect.
+  # Otherwise try to match by pattern "anom_" in sim_anom and df_anom
+  common_cols <- intersect(grep("^anom_", colnames(sim_anom), value = TRUE),
+                           grep("^anom_", colnames(df_anom), value = TRUE))
+}
+if(length(common_cols) == 0) stop("Could not find shared anomaly column names between sim_anom and df_anom.")
 
-# Need original anomaly series (from df_anom or seasonal subtraction step)
-if(!exists("df_anom")) {
-  stop("df_anom (observed anomalies) must exist. It was created during seasonal decomposition.")
+message("Common anomaly columns used for alignment: ", paste(common_cols, collapse = ", "))
+
+# 2) Build candidate mask of rows in df_anom that are complete for those columns
+mask_complete <- complete.cases(df_anom[, common_cols, drop = FALSE])
+n_mask <- sum(mask_complete)
+n_sim  <- nrow(sim_anom)
+message("df_anom complete-case rows for those columns: ", n_mask, "; sim_anom rows: ", n_sim)
+
+# 3) Choose rows to fill in df_anom for sim_anom
+if(n_mask == n_sim) {
+  use_idx <- which(mask_complete)
+  method_used <- "exact_complete_match"
+} else if(n_mask > n_sim) {
+  # More complete rows than sim rows -> assume sim corresponds to first n_sim of those complete rows
+  use_idx <- which(mask_complete)[1:n_sim]
+  method_used <- "first_N_of_complete_rows"
+} else {
+  # n_mask < n_sim: not enough strictly complete rows. Try a fallback:
+  # Use rows with smallest number of NA among the relevant columns (least-missing), preserving time order.
+  miss_count <- apply(is.na(df_anom[, common_cols, drop = FALSE]), 1, sum)
+  ranked <- order(miss_count, decreasing = FALSE)  # fewest NAs first
+  # pick first n_sim indices, then sort to keep chronological order
+  use_idx <- sort(ranked[1:n_sim])
+  method_used <- "least-missing_fallback"
 }
 
-# Make sure synthetic anomalies are present
-if(!"anom_T_air" %in% names(synthetic)) {
-  stop("synthetic must contain anomaly columns, e.g., anom_T_air")
+message("Alignment method used: ", method_used)
+message("Filling sim_anom into df_anom at indices: ", paste(head(use_idx,3), collapse = ", "),
+        " ... ", paste(tail(use_idx,3), collapse = ", "))
+
+# 4) Build full-length sim_anom_full with same time index as df_anom
+sim_anom_full <- df_anom %>% dplyr::select(time) 
+
+# create anomaly columns initialized NA with same names as sim_anom columns
+for(v in colnames(sim_anom)) {
+  sim_anom_full[[v]] <- NA_real_
 }
 
-# Add doy/hour for grouping
-obsA <- df_anom %>% mutate(doy = yday(time), hour = hour(time))
-synA <- synthetic %>% mutate(doy = yday(time), hour = hour(time))
+# 5) Fill the chosen use_idx rows with sim_anom rows (align by order)
+nfill <- min(length(use_idx), nrow(sim_anom))
+for(v in colnames(sim_anom)) {
+  sim_anom_full[[v]][use_idx[1:nfill]] <- sim_anom[[v]][1:nfill]
+}
 
-# Build observed anomaly pools for each doy-hour window
+# quick diagnostic: how many non-NA filled per column
+filled_counts <- sapply(colnames(sim_anom), function(v) sum(!is.na(sim_anom_full[[v]])))
+message("Filled counts (non-NA) per sim var (first few):")
+print(head(filled_counts, 10))
+
+# 6) Join anomalies and seasonal T into synthetic
+# ensure synthetic has doy/hour
+if(!"doy" %in% names(synthetic_fixed)) synthetic <- synthetic_fixed %>% mutate(doy = yday(time))
+if(!"hour" %in% names(synthetic_fixed)) synthetic_fixed <- synthetic_fixed %>% mutate(hour = hour(time))
+
+# Determine seasonal column name in df_anom (common variants)
+seas_candidates <- c("T_air_t_seas","T_air_seasonal","T_air_seas","T_air_t_season_mean")
+seas_col <- intersect(seas_candidates, names(df_anom))
+if(length(seas_col) == 0) stop("No seasonal temperature column found in df_anom (expected one of: T_air_t_seas, T_air_seasonal, ...).")
+seas_col <- seas_col[1]
+# if needed rename df_anom seasonal to canonical name (not strictly necessary here)
+df_anom2 <- df_anom %>% rename(T_air_t_seas = !!sym(seas_col))
+
+# join anomaly and seasonal back into synthetic
+synthetic_fixed <- synthetic_fixed %>%
+  left_join(sim_anom_full %>% dplyr::select(time, all_of(colnames(sim_anom))), by = "time") %>%
+  left_join(df_anom2 %>% dplyr::select(time, T_air_t_seas), by = "time")
+
+
+# 7) Build pre-QM T_air_raw if anom + seas present
+if(!("anom_T_air_t" %in% names(synthetic_fixed))) {
+  # if sim_anom uses different anomaly name for T, try to find it
+  t_anom_cand <- intersect(c("anom_T_air_t","anom_T_air","T_air_anom","anom_air_temp"), names(synthetic))
+  if(length(t_anom_cand)==0) stop("Cannot find T-air anomaly in synthetic after join. Columns present: ", paste(names(synthetic), collapse=", "))
+  synthetic_fixed <- synthetic_fixed %>% rename(anom_T_air_t = !!sym(t_anom_cand[1]))
+}
+if(!("T_air_t_seas" %in% names(synthetic_fixed))) stop("T_air_t_seas missing in synthetic after join; can't reconstruct.")
+
+synthetic_fixed <- synthetic_fixed %>% mutate(T_air_raw = anom_T_air_t + T_air_t_seas)
+
+# 8) Quantile mapping on anomalies (seasonal window)
+obsA <- df_anom2 %>% dplyr::select(time, doy, hour, anom_T_air_t)
 window_days <- 14
 circ_dist <- function(a,b,N=365) pmin(abs(a-b), N-abs(a-b))
 
@@ -525,47 +603,34 @@ get_pool <- function(target_doy, target_hour) {
 qm_one <- function(x, pool) {
   if(is.na(x) || length(pool) < 30) return(x)
   p <- ecdf(pool)(x)
-  quantile(pool, probs = p, type=8, na.rm=TRUE)
+  quantile(pool, probs = p, type = 8, na.rm = TRUE)
 }
 
-# Vectorized quantile mapping
-synA$T_air_qm <- map2_dbl(synA$T_air,
-                               paste0(synA$doy, "_", synA$hour), 
-                               function(x, key){
-                                 parts <- strsplit(key, "_")[[1]]
-                                 doy <- as.integer(parts[1]); hr <- as.integer(parts[2])
-                                 pool <- get_pool(doy, hr)
-                                 qm_one(x, pool)
-                               })
+synthetic_fixed = synthetic_fixed |> 
+  mutate(doy = yday(time))
 
-# Reconstruct corrected physical temperature
-synthetic$T_air <- synA$anom_T_air_qm + synthetic$T_air_seasonal
+synthetic_fixed$anom_T_air_qm <- purrr::pmap_dbl(
+  list(synthetic_fixed$anom_T_air_t, synthetic_fixed$doy, synthetic_fixed$hour),
+  function(x, doy, hour) qm_one(x, get_pool(doy, hour))
+)
 
-# Recompute outgoing longwave using Stefan–Boltzmann
+# 9) Reconstruct final T_air and recompute LWR_out
+synthetic_fixed <- synthetic_fixed %>% mutate(T_air = anom_T_air_qm + T_air_t_seas)
+
 sigma <- 5.670374419e-8
-if(!exists("orig_emissivity")) {
-  orig_emissivity <- mean(df$LWR_out / (sigma * df$T_air^4), na.rm=TRUE)
-  orig_emissivity <- min(max(orig_emissivity, 0.4), 1.0)
-}
-synthetic$LWR_out <- orig_emissivity * sigma * (synthetic$T_air^4)
+orig_emissivity <- mean(df$LWR_out / (sigma * df$T_air^4), na.rm=TRUE)
+orig_emissivity <- min(max(orig_emissivity, 0.4), 1.0)
 
-synthetic_fixed <- synthetic
+synthetic_fixed <- synthetic_fixed %>% mutate(LWR_out = orig_emissivity * sigma * (T_air^4))
 
+# Diagnostics
+message("Finished alignment/QM. Diagnostics:")
+message("Method used: ", method_used)
+message("sim_anom rows:", n_sim, " ; df_anom rows:", nrow(df_anom), " ; synthetic rows:", nrow(synthetic))
+message("non-NA filled in anom_T_air_t:", sum(!is.na(sim_anom_full$anom_T_air_t)))
+message("synthetic T_air summary:")
+print(summary(synthetic$T_air))
 
-# ---------------------------
-# 7. (Optional) Recompute LWR_out physically for thermodynamic consistency
-#    Use emissivity estimated from original data: emissivity = mean(LWR_out / (sigma * T^4))
-#    Then recompute LWR_out_sim = emissivity * sigma * T_sim^4
-# ---------------------------
-orig_emissivity <- mean((df$LWR_out) / (sigma_sb * (df$T_air)^4), na.rm = TRUE)
-message("Estimated mean emissivity from original data: ", signif(orig_emissivity,4))
-# limit emissivity to sensible bounds
-orig_emissivity <- pmin(pmax(orig_emissivity, 0.4), 1.0)
-
-synthetic <- synthetic %>%
-  mutate(
-    LWR_out = orig_emissivity * sigma_sb * (T_air)^4
-  )
 
 # We keep LWR_out computed physically, but keep the raw simulated as well if you want to compare:
 #synthetic <- synthetic %>% relocate(LWR_out_raw, .after = LWR_out)
@@ -573,7 +638,7 @@ synthetic <- synthetic %>%
 # ---------------------------
 # 8. Enforce simple physical constraints
 # ---------------------------
-synthetic <- synthetic %>%
+synthetic <- synthetic_fixed %>%
   mutate(
     albedo = pmin(pmax(albedo, 0), 1),
     relative_humidity = pmin(pmax(relative_humidity, 0), 1),
@@ -651,7 +716,7 @@ message("Created 'synthetic_time_series' tibble in the global environment.")
 # ---------------------------
 # 1) Configure target horizon
 last_obs_time <- max(df$time)           # end of your observed record (e.g., in 2024)
-horizon_year <- 2060                    # target final year
+horizon_year <- 2050                   # target final year
 # Determine timestep (seconds) from existing data (robust for hourly, sub-hourly, daily)
 dt_seconds <- as.numeric(median(diff(sort(df$time)), na.rm = TRUE), units = "secs")
 if(is.na(dt_seconds) || dt_seconds <= 0) dt_seconds <- 3600  # fallback to hourly if weird
@@ -737,3 +802,4 @@ assign("future_physical", future_physical, envir = .GlobalEnv)
 
 message("Saved `future_physical` to global environment. Length: ", nrow(future_physical),
         " rows. Time range: ", min(future_physical$time), " -> ", max(future_physical$time))    
+

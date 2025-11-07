@@ -250,5 +250,5 @@ results |>
   ) +
   geom_point(data = ice_thickness, aes(x = date_time, y = z_water_m)) + 
   ggtitle("East Lake Bonney", 
-          subtitle = "selecting max temp, SW, wind") +
+          subtitle = "Using synthetic VAR data past 2023.") +
   theme_linedraw(base_size = 20)
