@@ -27,28 +27,23 @@ source("R/ELB/00_ELB_data_preparation.R")
 # plot input data to check for funny business
 #rename depending on which scenario you are plugging in
 
-time_series <- time_series_total %>%
-  # assume you have all years present
-  mutate(year = as.integer(year(time)), 
-         month = as.integer(month(time)), 
-         temp_air = T_air, 
-         sw = SW_in) %>%
-  arrange(year, month) %>%
-  group_by(year) %>%
-  mutate(warming_rate = 0.0015) %>%
-  ungroup() %>%
+time_series = future_physical
+
+# Stefan–Boltzmann constant
+sigma <- 5.67e-8  # W/m2/K4
+
+# ice surface emissivity (approx.)
+emissivity <- 0.97
+
+# Compute LWR_out (assume surface at freezing point unless melted)
+time_series <- time_series %>%
   mutate(
-    cum_mult = cumprod(1 + warming_rate[!duplicated(year)])[match(year, unique(year))],
-    T_air = if_else(month %in% 2:9 & year > 2024, temp_air * cum_mult, T_air), 
-    #SW_in = if_else(month %in% 2:9, sw * cum_mult, SW_in), 
-    SW_in = sw
-  )
+    LWR_out = emissivity * sigma * (T_air^4),  # outgoing longwave flux
+    delta_T = T_air - lag(T_air)
+  ) |> 
+  rbind(time_series_actual)
 
-# or if you selected your changes in the data prep side: 
-time_series = time_series_total
-
-
-L_initial <- 3.88       # Initial ice thickness (m) Ice thickness at 12/17/2016 ice to ice
+L_initial <- 3.30       # Initial ice thickness (m) Ice thickness at 12/17/2016 ice to ice
 
 series <- time_series |> 
   pivot_longer(cols = c(T_air, SW_in, LWR_in, LWR_out, pressure, albedo, relative_humidity, wind), 
@@ -62,14 +57,15 @@ ggplot(series, aes(time, data)) +
 
 
 ###################### MODEL BEGINS ######################
-nt <- (1/dt)*6.95*365.   # adjust as needed
-n_iterations <- nt
+n_iterations = nrow(time_series)
 
 # Initialize results tibble
 results <- tibble(
   time = rep(as.POSIXct(NA), n_iterations),  # Initialize `time` as NA POSIXct
-  depth = numeric(n_iterations),             # Initialize `depth` as numeric
-  temperature = numeric(n_iterations),       # Initialize `temperature` as numeric
+  #depth = numeric(n_iterations),             # Initialize `depth` as numeric
+  #temperature = numeric(n_iterations),       # Initialize `temperature` as numeric
+  depth = vector("list", n_iterations),        # list-column
+  temperature = vector("list", n_iterations),  # list-column
   thickness = numeric(n_iterations),         # Initialize `thickness` as numeric
   LW_net = numeric(n_iterations),            # Net Longwave flux
   SW = numeric(n_iterations),                # Shortwave Radiation Flux
@@ -82,6 +78,7 @@ results <- tibble(
   bottom_gain = numeric(n_iterations),
   Iteration = numeric(n_iterations)          # Initialize `Iteration` as numeric
 )
+
 
 ###################### Initialize temperature profile and ice thickness ######################
 L = L_initial
@@ -102,22 +99,6 @@ pb <- progress_bar$new(
 # add steps to save the individual flux values
 ###################### Simulation loop ######################
 for (t_idx in 1:nrow(time_series)) {
-  
-  #store results for time step
-  results$time[t_idx] <- time_series$time[t_idx]
-  results$depth[t_idx] <- depth
-  results$temperature[t_idx] <- prevT
-  results$thickness[t_idx] <- prevL
-  results$LW_net[t_idx] <- LW_net
-  results$SW_abs[t_idx] <- SW_abs
-  results$SW[t_idx] <- SW_in
-  results$sensible_Q[t_idx] <- Qh
-  results$latent_Q[t_idx] <- Ql
-  results$conductive_Q[t_idx] <- Qc
-  results$surface_heat_flux[t_idx] <- surface_flux
-  results$surface_loss[t_idx] <- dL_surface
-  results$bottom_gain[t_idx] <- dL_bottom
-  results$Iteration[t_idx] <- t_idx  
   
   #ice thickness
   newL = prevL # Copy current thickness
@@ -148,6 +129,9 @@ for (t_idx in 1:nrow(time_series)) {
   
   # Net longwave radiation (incoming - outgoing)
   LW_net <- (LWR_in - LWR_out)
+  
+  if (!exists("LW_net") || length(LW_net) == 0) LW_net <- NA
+  if (!exists("SW_abs") || length(SW_abs) == 0) SW_abs <- NA
   
   #calculate sensible heat flux
   rho_air = (press*Ma)*0.1 / (R*T_air)
@@ -236,6 +220,22 @@ for (t_idx in 1:nrow(time_series)) {
   prevT <- newT
   prevL = newL
   depth = newdepth
+  
+  #store results for time step
+  results$time[t_idx] <- time_series$time[t_idx]
+  results$depth[t_idx] <- depth
+  results$temperature[t_idx] <- prevT
+  results$thickness[t_idx] <- prevL
+  results$LW_net[t_idx] <- LW_net
+  results$SW_abs[t_idx] <- SW_abs
+  results$SW[t_idx] <- SW_in
+  results$sensible_Q[t_idx] <- Qh
+  results$latent_Q[t_idx] <- Ql
+  results$conductive_Q[t_idx] <- Qc
+  results$surface_heat_flux[t_idx] <- surface_flux
+  results$surface_loss[t_idx] <- dL_surface
+  results$bottom_gain[t_idx] <- dL_bottom
+  results$Iteration[t_idx] <- t_idx  
   
   pb$tick()
 }

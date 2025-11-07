@@ -1,342 +1,5 @@
-######### model input data prep ##########
 
-#set working directory
-setwd("~chdo4929")
 
-
-###################### Load Time Series Data by Station ######################
-# met station data can be found at the McMurdo Long Term Ecological Research website or on the Environmental Data Initiative
-BOYM <- read_csv("~/Library/CloudStorage/OneDrive-UCB-O365/Documents/MCM-LTER_Met/met stations/mcmlter-clim_boym_15min-20250205.csv") |> 
-  mutate(date_time = ymd_hms(date_time)) |> 
-  filter(date_time > '2016-12-21 00:00:00')
-
-HOEM <- read_csv("~/Library/CloudStorage/OneDrive-UCB-O365/Documents/MCM-LTER_Met/met stations/mcmlter-clim_hoem_15min-20250205.csv") |> 
-  mutate(date_time = ymd_hms(date_time)) |> 
-  filter(date_time > '2016-12-21 00:00:00') |> 
-  mutate(airtemp_3m_K = airtemp_3m_degc + 273.15)
-
-COHM <- read_csv("~/Library/CloudStorage/OneDrive-UCB-O365/Documents/MCM-LTER_Met/met stations/mcmlter-clim_cohm_15min-20250205.csv") |> 
-  mutate(date_time = ymd_hms(date_time)) |> 
-  filter(date_time > '2016-12-21 00:00:00')
-
-TARM <- read_csv("~/Library/CloudStorage/OneDrive-UCB-O365/Documents/MCM-LTER_Met/met stations/mcmlter-clim_tarm_15min-20250205.csv") |> 
-  mutate(date_time = ymd_hms(date_time)) |> 
-  filter(date_time > '2016-12-21 00:00:00') |> 
-  mutate(airtemp_3m_K = airtemp_3m_degc + 273.15)
-
-###################### Define Parameters ######################
-L_initial <- 3.88       # Initial ice thickness (m) Ice thickness at 12/17/2016 ice to ice
-dx <- 0.10             # Spatial step size (m)
-nx = L_initial/dx       # Number of spatial steps
-dt <-  1/24             # Time step for stability (in days)
-nt <- (1/dt)*24*365.   # Number of time steps
-
-# Stability check: Ensure R < 0.5 for stability
-r <- alpha * (dt * 86400) / dx^2  # dt is in days, so multiply by 86400 to convert to seconds
-if (r > 0.5) stop("r > 0.5, solution may be unstable. Reduce dt or dx.")
-
-sigma = 5.67e-8         # stefan boltzman constant
-R = 8.314462            # Universal gas constant kg⋅m^2⋅s^-2⋅K^-1⋅mol^-1
-Ma = 28.97              # Molecular Weight of Air kg/mol
-Ca = 1.004              # Specific heat capacity of air J/g*K
-Ch = 1.75e-3            # bulk transfer coefficient as defined in 1979 Parkinson and Washington
-Ce = 1.75e-3            # bulk transfer coefficient as defined in 1979 Parkinson and Washington
-
-epsilon = 0.97          # surface emissivity (for estimating LW if we ever get there)
-S = 1367                # solar constant W m^-2
-Tf = 273.16             # Temperature of water freezing (K)
-xLv = 2.500e6           # Latent Heat of Evaporation (J/kg)
-xLf = 3.34e5            # Latent Heat of Fusion (J/kg)
-
-xLs = xLv + xLf         # Latent Heat of Sublimation
-k <- 2.3                # Thermal conductivity of ice (W/m/K)
-rho <- 917              # Density of ice (kg/m^3)
-c <- 2100               # Specific heat capacity of ice (J/kg/K)
-alpha <- k / (rho * c)  # Thermal diffusivity (m^2/s)
-L_f <- xLf  
-Chi = 0.4               # Solar Absorption constant (adustable)             
-
-
-###################### Separate data out into input parameters ######################
-#preemptively set working directory back 
-setwd("~/Documents/R-Repositories/TVLakes_IceModel")
-
-# select air temperature data from Lake Bonney Met, and gapfill holes with Lake Hoare
-# this step is mainly to gather a time series for gap filling other portions of the script. Air temperature data is sourced 
-# the East Lake Bonney Permanent Monitoring Station (ELBBB)
-
-###################### AIR TEMPERATURE DATA ######################
-## load air temperature data from East Lake Bonney Lake Monitoring Station (unpublished data)
-
-#time_model = start_time + seq(0, by = dt* 86400, length.out = nt)  # Convert dt from days to seconds
-start_time <- min(BOYM$date_time)
-
-# Generate model time steps (POSIXct format)
-time_model <- start_time + seq(0, by = dt * 86400, length.out = nt)  # Convert dt from days to seconds
-
-
-air_temperature <- read_csv("Data/air_temp_ELBBB.csv") |> 
-  mutate(date_time = mdy_hm(date_time), 
-         airtemp_3m_K = surface_temp_C + 273.15)
-
-# load air temperature data from the West Lake Bonney Lake Monitoring Station, to fill gaps in the ELBBB record
-wlbbb_airtemp <- read_csv('Data/air_temp_WLBBB.csv') |> 
-  mutate(date_time = mdy_hm(date_time), 
-         airtemp_3m_K = surface_temp_C + 273.15) |> 
-  filter(date_time < "2023-11-01 00:00:00")
-
-# Define the full sequence of timestamps at 15-minute intervals
-full_timestamps <- data.frame(date_time = seq(from = min(air_temperature$date_time), 
-                                              to = max(air_temperature$date_time), 
-                                              by = "15 min"))
-
-# Merge with original data and fill missing values with NA
-air_temp_gaps <- full_timestamps |> 
-  left_join(air_temperature, by = "date_time")
-
-# fill gaps in record at East Lake Bonney with data from West Lake Bonney
-air_temperature <- air_temp_gaps |> 
-  mutate(airtemp_3m_K = ifelse(is.na(airtemp_3m_K), wlbbb_airtemp$airtemp_3m_K, airtemp_3m_K))
-
-###################### SHORTWAVE RADIATION DATA ######################
-# select incoming shortwave radiation data from Lake Bonney Met and fill gaps. Gaps are first filled with data from the 
-# next nearest station (Taylor Glacier Met), but failing that, an empirical equation defined in Obryk et al, 2016 is used. 
-shortwave_radiation_initial <- BOYM |> 
-  dplyr::select(metlocid, date_time, swradin_wm2) |> 
-  mutate(swradin_wm2 = ifelse(is.na(swradin_wm2), TARM$swradin_wm2, swradin_wm2)) # replace empty shortwave data with TARM, nearest met station
-
-# create an artificial shortwave object
-# Coordinates of East Lobe Bonney Blue Box
-latitude <- -77.13449
-longitude <- 162.449716
-
-artificial_shortwave <- tibble(
-  date_time = time_model, 
-  zenith = 90 - getSunlightPosition(time_model, lat = latitude, lon = longitude)$altitude, #convert to zenith by subtracting the altitude from 90 degrees. 
-  sw = S*cos(zenith)*3.0) # multiplied by 3 to make data better match historical mean.
-
-shortwave_radiation <- shortwave_radiation_initial |> 
-  left_join(artificial_shortwave, by = "date_time") |>    # Join on date_time
-  mutate(swradin_wm2 = ifelse(is.na(swradin_wm2), sw, swradin_wm2)) |>   # Fill missing values
-  dplyr::select(-sw)  |> # Remove extra column
-  filter(swradin_wm2 > 0)
-
-
-###################### OUTGOING (UPWELLING) LONGWAVE RADIATION DATA ######################
-# select outgoing longwave radiation data from  Bonney Lake Glacier Met 
-outgoing_longwave_radiation_initial <- COHM |> 
-  dplyr::select(metlocid, date_time, lwradout2_wm2) |> 
-  mutate(yday = yday(date_time), 
-         hour = hour(date_time))
-
-annual_mean_outgoing_longwave <- COHM |> 
-  dplyr::select(metlocid, date_time, lwradout_wm2, lwradout2_wm2) |> 
-  mutate(yday = yday(date_time), 
-         j_day = julian(date_time), 
-         hour = hour(date_time), 
-         year = year(date_time)) |> 
-  group_by(yday, hour) |> 
-  summarize(mean_lwout = mean(lwradout_wm2, na.rm = T), 
-            mean_lwout2 = mean(lwradout2_wm2, na.rm = T))
-
-outgoing_longwave_radiation <- outgoing_longwave_radiation_initial |> 
-  left_join(annual_mean_outgoing_longwave) |>    # Join on date_time
-  mutate(lwradout2_wm2 = ifelse(is.na(lwradout2_wm2), mean_lwout2, lwradout2_wm2))  # Fill missing value
-
-
-############# INCOMING (DOWNWELLING) LONGWAVE RADIATION DATA ######################
-# select incoming longwave radiation data from Commonwealth Glacier Met
-incoming_longwave_radiation_initial <- COHM |> 
-  dplyr::select(metlocid, date_time, lwradin2_wm2, lwradin_wm2)
-
-# Determine the last timestamp
-last_timestamp <- max(incoming_longwave_radiation_initial$date_time)
-
-# Generate new timestamps up to 2025 at the same 15-minute interval
-new_timestamps <- seq.POSIXt(from = last_timestamp + 15*60, 
-                             to = as.POSIXct("2025-01-31 23:45:00"), 
-                             by = "15 min")
-
-# Create an empty dataframe with new timestamps and NA for other columns
-new_df <- data.frame(date_time = new_timestamps)
-
-# Bind the old and new dataframes
-incoming_longwave_radiation_initial <- bind_rows(incoming_longwave_radiation_initial, new_df) |> 
-  mutate(yday = yday(date_time), 
-         hour = hour(date_time))
-
-# create an artificial dataset taking the historical mean of incoming longwave radiation on each day
-# and using that to gap fill instead of using the modeled data (bad data)
-annual_mean_incoming_longwave <- COHM |> 
-  dplyr::select(metlocid, date_time, lwradin_wm2, lwradin2_wm2) |> 
-  mutate(yday = yday(date_time), 
-         j_day = julian(date_time), 
-         hour = hour(date_time), 
-         year = year(date_time)) |> 
-  group_by(yday, hour) |> 
-  summarize(mean_lwin = mean(lwradin_wm2, na.rm = T), 
-            mean_lwin2 = mean(lwradin2_wm2, na.rm = T))
-
-#join to fill gaps
-incoming_longwave_radiation <- incoming_longwave_radiation_initial |> 
-  left_join(annual_mean_incoming_longwave) |>    # Join on date_time
-  mutate(lwradin2_wm2 = ifelse(is.na(lwradin2_wm2), mean_lwin2, lwradin2_wm2)) |>   # Fill missing values
-  dplyr::select(-c(mean_lwin2, mean_lwin))   # Remove extra column 
-
-
-###################### AIR PRESSURE DATA ######################
-# Air pressure is collected at Lake Hoare Meteorological Station
-air_pressure = HOEM |> 
-  mutate(bpress_Pa = bpress_mb*100) |>  # air pressure was initially in mbar, needs to be in Pascal. 
-  dplyr::select(metlocid, date_time, bpress_Pa)
-
-
-###################### WIND SPEED DATA ######################
-wind_speed = BOYM |> 
-  dplyr::select(metlocid, date_time, wspd_ms) |>  # wind speed is in meters per second
-  mutate(wspd_ms = ifelse(is.na(wspd_ms), TARM$wspd_ms, wspd_ms)) # fill in lost wind values from TARM, next nearest met station
-
-
-###################### RELATIVE HUMIDITY DATA ######################
-# load relative humidity data
-relative_humidity <- BOYM |> 
-  dplyr::select(metlocid, date_time, rhh2o_3m_pct, rhice_3m_pct) |> 
-  mutate(rhh2o_3m_pct = ifelse(is.na(rhh2o_3m_pct), TARM$rhh2o_3m_pct, rhh2o_3m_pct))
-
-
-###################### ICE THICKNESS DATA ######################
-# load ice thickness data and manipulate for easier plotting
-ice_thickness <- read_csv("Data/mcmlter-lake-ice_thickness-20250218_0_2025.csv") |>
-  mutate(date_time = mdy_hm(date_time), 
-         z_water_m = z_water_m*-1) |> 
-  filter(location_name == "East Lake Bonney") |> 
-  filter(date_time > "2016-12-01" & date_time < "2024-02-01")
-
-
-###################### ALBEDO DATA ######################
-# Load and prepare the data
-albedo_orig <- read_csv("Data/AlbedoModel.csv") |>  
-  # mutate(sediment = sediment_abundance) |> 
-  filter(lake == "East Lake Bonney") |> 
-  mutate(date = ymd(sed.date),  # or ymd() if no time data is present, adjust as needed
-         month = month(sed.date), 
-         year = year(sed.date)) |> 
-  drop_na(albedo.predict.bb)
-
-# Generate 15-minute intervals across the full date range
-start_time <- floor_date(min(albedo_orig$date), unit = "15 minutes")
-end_time <- ceiling_date(max(albedo_orig$date), unit = "15 minutes")
-time_15min <- tibble(time = seq(from = start_time, to = end_time, by = "15 mins"))
-
-# Join 15-minute grid with original data
-albedo1 <- time_15min |> 
-  left_join(albedo_orig |> select(date, albedo.predict.bb), by = c("time" = "date")) |> 
-  arrange(time) |> 
-  fill(albedo.predict.bb, .direction = "down")
-
-
-###################### Interpolate Data to match model time steps #####################
-
-#Interpolate air temperature to match the model time steps
-airt_interp <- approx(
-  x = as.numeric(air_temperature$date_time),  # Convert date_time to numeric for interpolation
-  y = air_temperature$airtemp_3m_K,
-  xout = as.numeric(time_model),   # Interpolate at model time steps
-  rule = 2                         # Use constant extrapolation for out-of-bound values
-)$y
-
-# Interpolate shortwave radiation to match the model time steps
-sw_interp <- approx(
-  x = as.numeric(shortwave_radiation$date_time),  # Convert date_time to numeric for interpolation
-  y = shortwave_radiation$swradin_wm2,
-  xout = as.numeric(time_model),   # Interpolate at model time steps
-  rule = 2                         # Use constant extrapolation for out-of-bound values
-)$y
-
-# Interpolate longwave radiation to match the model time steps
-LWR_in_interp <- approx(
-  x = as.numeric(incoming_longwave_radiation$date_time),  # Convert date_time to numeric for interpolation
-  y = incoming_longwave_radiation$lwradin2_wm2,
-  xout = as.numeric(time_model),   # Interpolate at model time steps
-  rule = 2                         # Use constant extrapolation for out-of-bound values
-)$y
-
-# longwave outgoign interpolate
-LWR_out_interp <- approx(
-  x = as.numeric(outgoing_longwave_radiation$date_time),  # Convert date_time to numeric for interpolation
-  y = outgoing_longwave_radiation$lwradout2_wm2,
-  xout = as.numeric(time_model),   # Interpolate at model time steps
-  rule = 2                         # Use constant extrapolation for out-of-bound values
-)$y
-
-#reshape albedo (use this for the GEE dataset)
-albedo_interp <- approx(
-  x = as.numeric(albedo1$time),                     # Original dates as numeric
-  y = albedo1$albedo.predict.bb,                   # Albedo means to interpolate
-  xout = as.numeric(time_model),                   # Target times as numeric
-  rule = 2                                         # Constant extrapolation for out-of-bound values
-)$y
-
-#pressure interpolate
-pressure_interp <- approx(
-  x = as.numeric(air_pressure$date_time),  # Convert date_time to numeric for interpolation
-  y = air_pressure$bpress_Pa,
-  xout = as.numeric(time_model),   # Interpolate at model time steps
-  rule = 2                         # Use constant extrapolation for out-of-bound values
-)$y
-
-#wind interpolate
-wind_interp <- approx(
-  x = as.numeric(wind_speed$date_time),  # Convert date_time to numeric for interpolation
-  y = wind_speed$wspd_ms,
-  xout = as.numeric(time_model),   # Interpolate at model time steps
-  rule = 2                         # Use constant extrapolation for out-of-bound values
-)$y
-
-#relative humidity interpolate
-relative_humidity_interp <- approx(
-  x = as.numeric(relative_humidity$date_time),
-  y = relative_humidity$rhh2o_3m_pct, 
-  xout = as.numeric(time_model),
-  rule = 2
-)$y
-
-# Check if lengths of interpolated data match the time model
-if (length(airt_interp) != length(time_model) | 
-    length(sw_interp) != length(time_model) | 
-    length(LWR_in_interp) != length(time_model) |
-    length(LWR_out_interp) != length(time_model) |
-    length(albedo_interp) != length(time_model) |
-    length(pressure_interp) != length(time_model) |
-    length(wind_interp) != length(time_model) |
-    length(relative_humidity_interp) != length(time_model)
-) {
-  stop("Length of interpolated data does not match the model time steps!")
-}
-
-
-###################### Create the time series tibble for model time ######################
-time_series_interp <- tibble(
-  time = time_model,                           # Model time steps
-  T_air = airt_interp,                         # Interpolated air temperature Kelvin
-  SW_in = sw_interp,                           # Interpolated shortwave radiation w/m2
-  LWR_in = LWR_in_interp,                      # Interpolated incoming longwave radiation w/m2
-  LWR_out = LWR_out_interp,                    # Interpolated outgoing longwave radiation w/m2
-  albedo = albedo_interp,
-  pressure = pressure_interp,                  # Interpolated air pressure, Pa
-  wind = wind_interp,                          # interpolated wind speed, m/s
-  delta_T = T_air - lag(T_air),                # difference in air temperature, for later flux calculation
-  relative_humidity = relative_humidity_interp # relative humidity
-) |> 
-  drop_na(delta_T)  # removes the first row where the difference in temperatures yields NA
-
-
-######################### Synthentic Meteorological Dataset Creation ############################
-
-# Synthetic multivariate climate time series using VAR + residual bootstrap
-# Input expected: a tibble named `time_series_interp` with columns:
-# time, T_air (K), SW_in, LWR_in, LWR_out, albedo, pressure (Pa), wind (m/s), delta_T, relative_humidity
-#
 # Author: ChatGPT
 # Date: 11/6/2025
 #
@@ -347,13 +10,16 @@ if(length(new_pkgs)) install.packages(new_pkgs)
 library(tidyverse); library(lubridate); library(zoo); library(vars)
 library(copula); library(ggplot2); library(reshape2); library(gridExtra); library(scales)
 
+# pull and collate input met data
+source("R/ELB/00_ELB_data_preparation.R")
+
 # ---------------------------
 # 1. Prepare and sanity-check
 # ---------------------------
 # Ensure your tibble is present
-if(!exists("time_series_interp")) stop("time_series_interp object not found. Please load it before running this script.")
+if(!exists("time_series_actual")) stop("time_series_actual object not found. Please load it before running this script.")
 
-df <- time_series_interp %>%
+df <- time_series_actual %>%
   arrange(time) %>%
   mutate(time = as.POSIXct(time, tz = "UTC")) # adjust tz if needed
 
@@ -423,13 +89,13 @@ seasonal_means <- df_trans %>%
   ) %>%
   group_by(doy, hour) %>%      # <--- IMPORTANT CHANGE
   summarise(
-    T_air_t_seasonal    = mean(T_air_t, na.rm = TRUE),
-    SW_in_t_seasonal    = mean(SW_in_t, na.rm = TRUE),
-    LWR_in_t_seasonal   = mean(LWR_in_t, na.rm = TRUE),
-    albedo_t_seasonal   = mean(albedo_t, na.rm = TRUE),
-    pressure_t_seasonal = mean(pressure_t, na.rm = TRUE),
-    wind_t_seasonal     = mean(wind_t, na.rm = TRUE),
-    rh_t_seasonal       = mean(rh_t, na.rm = TRUE),
+    T_air_t_seas    = mean(T_air_t, na.rm = TRUE),
+    SW_in_t_seas    = mean(SW_in_t, na.rm = TRUE),
+    LWR_in_t_seas   = mean(LWR_in_t, na.rm = TRUE),
+    albedo_t_seas   = mean(albedo_t, na.rm = TRUE),
+    pressure_t_seas = mean(pressure_t, na.rm = TRUE),
+    wind_t_seas     = mean(wind_t, na.rm = TRUE),
+    rh_t_seas       = mean(rh_t, na.rm = TRUE),
     .groups = "drop"
   )
 
@@ -458,11 +124,11 @@ if(any(na_rows)) {
 # ---------------------------
 # 4. Fit VAR (select lag)
 # ---------------------------
-max_lag <- 48  # adjust depending on data frequency / memory (48 for up to 2-day memory if hourly)
+max_lag <- 12  # adjust depending on data frequency / memory (48 for up to 2-day memory if hourly)
 lag_sel <- VARselect(Y_fit, lag.max = max_lag, type = "const")
 message("Lag selection results:"); print(lag_sel$selection)
 
-p_choice <- as.integer(lag_sel$selection["AIC(n)"])  # choose AIC-selected lag
+p_choice <- as.integer(lag_sel$selection["HQ(n)"])  # choose AIC-selected lag
 if(is.na(p_choice)) p_choice <- 1
 message("Selected VAR lag p = ", p_choice)
 
@@ -473,86 +139,114 @@ summary(var_model)
 resids <- residuals(var_model)   # matrix (n_obs - p) x nvars
 Sigma_res <- cov(resids, use = "pairwise.complete.obs")
 
-# ---------------------------
-# 5. Synthetic simulation function
-#    - recursive using model coefficients and bootstrap sampling of residuals
-# ---------------------------
 simulate_VAR_bootstrap <- function(var_model, n_sim, init_y = NULL, resids = NULL, seed = NULL) {
-  # var_model: fitted VAR object (vars::VAR)
-  # n_sim: number of steps to simulate
-  # init_y: initial p observations matrix (p x nvar). If NULL, use last p from model data
-  # resids: matrix of residuals to bootstrap from
-  # returns: matrix n_sim x nvar synthetic anomalies
   if(!is.null(seed)) set.seed(seed)
-  p <- var_model$p
-  k <- ncol(var_model$y)   # number of variables
+  
+  # dimensions
+  p  <- var_model$p
+  Y  <- var_model$y
+  k  <- ncol(Y)
+  varnames <- colnames(Y)
+  
+  # Extract coefficient lists
   coefs_list <- var_model$varresult
-  # Build coefficient arrays:
-  # companion style easier to apply: we will extract coef matrices A1..Ap and const
-  A_mats <- array(0, dim = c(k,k,p))
-  const_vec <- numeric(k)
-  for(i in seq_len(k)) {
-    co <- coef(coefs_list[[i]])
-    # names are like "const", "L1.var1", etc
-    const_vec[i] <- co["const"]
-    # extract lag coefficients for this equation
-    for(l in 1:p) {
-      # coef names for lag l: paste0("L",l,".", var names)
-      lag_names <- paste0("L", l, ".", colnames(var_model$y))
-      A_mats[i,,l] <- co[lag_names]
-    }
-  }
-  # transpose A_mats to have A_l matrices of shape k x k
-  A_list <- lapply(1:p, function(l) t(A_mats[,,l]))
-  # initial values
-  if(is.null(init_y)) {
-    # get last p observations used in fit
-    Y_full <- var_model$y  # matrix used in fit (nobs x k)
-    init_indices <- (nrow(Y_full) - p + 1):nrow(Y_full)
-    init_y <- Y_full[init_indices, , drop = FALSE]
-  }
-  if(is.null(resids)) stop("resids (bootstrap residuals) must be provided")
+  
   # Prepare storage
-  Ysim <- matrix(0, nrow = n_sim, ncol = k)
-  # rolling state: store last p observations, newest last row
-  state <- init_y
-  for(t in 1:n_sim) {
-    # deterministic part
-    mu_t <- const_vec
-    for(l in 1:p) {
-      mu_t <- mu_t + A_list[[l]] %*% state[nrow(state) - (l-1), ]
-    }
-    # sample residual
-    e_t <- resids[sample(nrow(resids), 1), ]
-    new_y <- as.vector(mu_t + e_t)
-    # append
-    Ysim[t, ] <- new_y
-    # update state: drop first, append new
-    if(p > 1) state <- rbind(state[-1, , drop = FALSE], new_y) else state <- matrix(new_y, nrow=1)
+  A_list <- vector("list", p)
+  for(l in 1:p) {
+    A_list[[l]] <- matrix(0, nrow = k, ncol = k)
   }
-  colnames(Ysim) <- colnames(var_model$y)
-  return(Ysim)
+  const_vec <- numeric(k)
+  
+  # Build coefficient matrices safely
+  for(i in seq_len(k)) {
+    this_mod <- coefs_list[[i]]
+    co <- coef(this_mod)   # <--- **THIS is co** (now defined!)
+    names_co <- names(co)
+    
+    # intercept handling
+    if("const" %in% names_co) {
+      const_vec[i] <- co["const"]
+    } else if("(Intercept)" %in% names_co) {
+      const_vec[i] <- co["(Intercept)"]
+    } else {
+      const_vec[i] <- 0
+    }
+    
+    # lag coefficients
+    for(l in 1:p) {
+      lag_names <- paste0("L", l, ".", varnames)
+      present <- intersect(lag_names, names_co)
+      if(length(present) > 0) {
+        A_list[[l]][i, match(present, lag_names)] <- co[present]
+      }
+    }
+  }
+  
+  # Initialization
+  if(is.null(init_y)) {
+    init_y <- tail(Y, p)
+  }
+  state <- as.matrix(init_y)
+  
+  if(is.null(resids)) stop("Must supply residual matrix")
+  resids <- as.matrix(resids)
+  
+  # Storage for simulated anomalies
+  Ysim <- matrix(NA_real_, nrow = n_sim, ncol = k)
+  colnames(Ysim) <- varnames
+  
+  # Recursive simulation
+  for(t in 1:n_sim) {
+    mean_t <- const_vec
+    for(l in 1:p) {
+      past_row <- state[nrow(state) - (l - 1), ]
+      mean_t <- mean_t + A_list[[l]] %*% past_row
+    }
+    e_t <- resids[sample(nrow(resids), 1), ]
+    new_y <- as.numeric(mean_t + e_t)
+    Ysim[t, ] <- new_y
+    
+    # roll state
+    if(p > 1) {
+      state <- rbind(state[-1,,drop=FALSE], new_y)
+    } else {
+      state <- matrix(new_y, nrow = 1)
+    }
+  }
+  
+  return(as.data.frame(Ysim))
 }
 
-# decide simulation length
-n_obs <- nrow(df)   # produce same length as original by default
-n_sim <- n_obs
 
-library(MTS)
+# 5. Synthetic simulation (bootstrap residual VAR simulation)
+# ---------------------------------------------------------
+# var_model must already be fitted, e.g.:
+# var_model <- VAR(df_var, p = lag_order, type = "const")
 
-# Suppose you have k variables and p lags
-k <- ncol(df_var)
-p <- lag_order
+# First, get residuals used for bootstrapping:
+resids <- residuals(var_model)  # matrix: nobs x k
+resids <- as.matrix(resids)     # ensure matrix form
+n_sim  <- nrow(resids)          # simulate the same number of observations
 
-sim_data <- VARMAsim(n = n_steps, ar = lapply(1:p, function(i) coef(var_model)[[i]]),
-                     sigma = cov(residuals(var_model)))
+# Run the simulation:
+sim_anom_mat <- simulate_VAR_bootstrap(
+  var_model = var_model,
+  n_sim     = n_sim,
+  init_y    = NULL,     # automatically uses last p model values
+  resids    = resids,   # bootstrap from empirical residuals
+  seed      = 123       # optional reproducibility
+)
 
-sim_anom <- as.data.frame(sim_data$series)
-colnames(sim_anom) <- colnames(df_var)
+# Convert to dataframe and keep column names consistent
+sim_anom <- as.data.frame(sim_anom_mat)
+colnames(sim_anom) <- colnames(var_model$y)
 
+# Check the result:
+summary(sim_anom)
+sapply(sim_anom, sd)
+any(is.na(sim_anom))
 
-# If you prefer Gaussian residuals, you can generate with mvrnorm:
-# sim_anom_gauss <- simulate_VAR_gaussian(...)  (not implemented here)
 
 # ---------------------------
 # 6. Reconstruct physical variables
@@ -594,12 +288,13 @@ if(any(na_rows)) {
 sim_full <- sim_full %>%
   left_join(seasonal_means, by = c("doy","hour"))
 
+
 # For each variable, compute simulated physical value = anomaly_sim + seasonal_mean
 # anom names are anom_<var>
 recon <- sim_full
 for(v in vars_t) {
   anom_col <- paste0("anom_", v)
-  seas_col <- paste0(v, "_seasonal")   # seasonal_means columns used suffix "_seas" earlier
+  seas_col <- paste0(v, "_seas")   # seasonal_means columns used suffix "_seas" earlier
   out_col  <- paste0(v, "_sim_recon")
   # the seasonal mean column exists as column named like "T_air_t_seas" in sim_full
   recon[[out_col]] <- recon[[anom_col]] + recon[[seas_col]]
@@ -629,6 +324,233 @@ synthetic <- tibble(
   # delta_T relative to previous time
   delta_T = T_air - lag(T_air)
 )
+
+##### Drop in Code patch to fix fit errors: ############
+# ---------- Drop-in correction patch ----------
+# Station coordinates (you provided)
+lat_site <- -77.7333
+lon_site <- 162.1667
+tz_site  <- "UTC"   # keep UTC unless you need local TZ
+
+# Packages
+required <- c("dplyr","lubridate","suncalc","purrr")
+newpk <- required[!(required %in% installed.packages()[,"Package"])]
+if(length(newpk)) install.packages(newpk)
+library(dplyr); library(lubridate); library(suncalc); library(purrr)
+
+# Ensure 'synthetic' and 'df' exist
+if(!exists("synthetic")) stop("No object named `synthetic` found. Run reconstruction first.")
+if(!exists("df")) stop("Observed data `df` is missing. Required for quantile mapping/clipping bounds.")
+
+# 1) Compute solar elevation for synthetic times
+# suncalc::getSunlightPosition returns altitude in radians
+sunpos <- getSunlightPosition(date = synthetic$time, lat = lat_site, lon = lon_site)
+synthetic$solar_alt <- sunpos$altitude  # radians; alt <= 0 => sun below horizon
+
+# 2) Shortwave fixes: force SW=0 when sun below horizon, remove negatives, clip at obs 99.9th
+# First compute empirical upper bound from observed data (use observed SW seasonal mask where sun > 0)
+# compute observed solar altitude for df as well (so ub excludes true-night zeros)
+obs_sunpos <- getSunlightPosition(date = df$time, lat = lat_site, lon = lon_site)
+df$solar_alt <- obs_sunpos$altitude
+
+# Observed upper bound (exclude true-night zeros)
+ub <- quantile(df$SW_in[df$solar_alt > 0], probs = 0.999, na.rm = TRUE)
+
+synthetic <- synthetic %>%
+  mutate(
+    SW_in_orig = SW_in,               # keep original simulated SW if you want to inspect
+    # zero where sun below horizon - preserves midnight sun in summer since solar_alt>0 there
+    SW_in = ifelse(solar_alt <= 0, 0, SW_in),
+    # remove small numerical negative leftovers
+    SW_in = ifelse(SW_in < 0, 0, SW_in),
+    # clip to empirical upper bound to remove unreal spikes
+    SW_in = pmin(SW_in, ub)
+  )
+
+# 3) Temperature quantile mapping by (doy, hour) window
+# Build observed grouped lists for quick lookup
+df <- df %>% mutate(doy = yday(time), hour = hour(time))
+obs_groups <- df %>%
+  group_by(doy, hour) %>%
+  summarise(vals = list(na.omit(T_air)), n = length(na.omit(T_air)), .groups = "drop")
+
+# small helper: circular day distance (handles year wrap)
+circ_dist <- function(a, b, nyear = 365) {
+  d <- abs(a - b)
+  pmin(d, nyear - d)
+}
+
+# Function to get pooled observed values within +/- window_days of target doy and same hour
+get_obs_pool <- function(target_doy, target_hour, window_days = 14) {
+  # find doy candidates from obs_groups
+  # compute distance for each obs_group doy -> select those within window_days
+  pool <- obs_groups %>%
+    filter(hour == target_hour) %>%
+    mutate(dd = circ_dist(doy, target_doy)) %>%
+    filter(dd <= window_days) %>%
+    pull(vals)
+  if(length(pool) == 0) return(numeric(0))
+  # pool is list of vectors; combine
+  unlist(pool)
+}
+
+# Quantile-map a single value using pooled observed sample:
+qm_map_one <- function(x, obs_pool) {
+  if(is.na(x) || length(obs_pool) < 10) return(x)  # not enough obs to map -> keep as-is
+  # p = empirical CDF of x relative to obs pool
+  p <- ecdf(obs_pool)(x)
+  # map to obs quantile
+  as.numeric(quantile(obs_pool, probs = p, na.rm = TRUE, type = 8))
+}
+
+# Apply quantile mapping over synthetic times (vectorised-ish)
+window_days <- 14  # +/- 14 days = 29-day window
+synthetic <- synthetic %>%
+  mutate(doy = yday(time), hour = hour(time)) %>%
+  mutate(
+    # precompute obs pools for each unique (doy,hour) in synthetic to speed mapping
+    obs_pool_id = paste0(doy,"_",hour)
+  )
+
+unique_keys <- unique(synthetic$obs_pool_id)
+# Build a named list of obs pools
+obs_pool_list <- setNames(vector("list", length(unique_keys)), unique_keys)
+for(k in unique_keys) {
+  parts <- strsplit(k, "_")[[1]]
+  dd <- as.integer(parts[1]); hh <- as.integer(parts[2])
+  obs_pool_list[[k]] <- get_obs_pool(dd, hh, window_days = window_days)
+}
+
+# Now map values (do in chunks to avoid huge mapply overhead)
+# Create vector of mapped T_air
+mapped_T <- vector("numeric", nrow(synthetic))
+for(i in seq_len(nrow(synthetic))) {
+  key <- synthetic$obs_pool_id[i]
+  obs_pool <- obs_pool_list[[key]]
+  mapped_T[i] <- qm_map_one(synthetic$T_air[i], obs_pool)
+}
+
+# Replace only where mapping produced a non-NA numeric (i.e., obs_pool had enough data)
+replace_idx <- !is.na(mapped_T)
+synthetic$T_air_qm <- synthetic$T_air   # keep original synthetic T_air for comparison
+synthetic$T_air[replace_idx] <- mapped_T[replace_idx]
+
+# 4) Recompute LWR_out from T_air using observed emissivity (recompute if not available)
+sigma_sb <- 5.670374419e-8
+if(exists("orig_emissivity")) {
+  emissivity <- orig_emissivity
+} else {
+  emissivity <- mean((df$LWR_out) / (sigma_sb * (df$T_air)^4), na.rm = TRUE)
+  emissivity <- pmin(pmax(emissivity, 0.4), 1.0)
+}
+synthetic <- synthetic %>% mutate(
+  LWR_out = emissivity * sigma_sb * (T_air)^4
+)
+
+# 5) Recompute LWR_in variance correction (optional mild correction):
+# We'll nudge LWR_in so its std matches observed within that (doy,hour) window.
+# Compute observed sd by (doy,hour) pooled window
+obs_sd_by_key <- df %>%
+  group_by(doy, hour) %>%
+  summarise(sd_obs = sd(LWR_in, na.rm = TRUE), .groups = "drop") %>%
+  mutate(key = paste0(doy,"_",hour))
+
+synthetic <- synthetic %>%
+  left_join(obs_sd_by_key %>% dplyr::select(key, sd_obs), by = c("obs_pool_id" = "key")) %>%
+  mutate(
+    # if sd_obs exists and synthetic's local sd is lower, amplify small residuals a bit
+    LWR_in_resid = LWR_in - mean(LWR_in, na.rm = TRUE),
+    LWR_in = ifelse(!is.na(sd_obs) & sd(LWR_in, na.rm=TRUE) < sd_obs,
+                    mean(LWR_in, na.rm=TRUE) + LWR_in_resid * (sd_obs / (sd(LWR_in, na.rm=TRUE) + 1e-9)),
+                    LWR_in)
+  ) %>%
+  dplyr::select(-LWR_in_resid, -sd_obs)
+
+# 6) Final physical constraints and tidy
+synthetic_fixed <- synthetic %>%
+  mutate(
+    SW_in = pmax(SW_in, 0),
+    albedo = pmin(pmax(albedo, 0), 1),
+    relative_humidity = pmin(pmax(relative_humidity, 0), 1),
+    wind = pmax(wind, 0),
+    pressure = pmax(pressure, 1)
+  ) %>%
+  dplyr::select(-solar_alt, -obs_pool_id, -doy, -hour)
+
+# Report diagnostics after fixes
+message("Diagnostics before/after fixes:")
+pre_counts <- synthetic %>% summarise(
+  neg_SW = sum(SW_in_orig < 0, na.rm=TRUE),
+  n240_260 = sum(T_air_qm >= 240 & T_air_qm <= 260, na.rm=TRUE)
+)
+post_counts <- synthetic_fixed %>% summarise(
+  neg_SW = sum(SW_in < 0, na.rm=TRUE),
+  n240_260 = sum(T_air >= 240 & T_air <= 260, na.rm=TRUE)
+)
+print(bind_rows(before = pre_counts, after = post_counts))
+
+# Save result to global env
+assign("synthetic_fixed", synthetic_fixed, envir = .GlobalEnv)
+message("synthetic_fixed created (clamped SW, QM T_air).")
+# ---------- End patch ----------
+
+
+
+# Need original anomaly series (from df_anom or seasonal subtraction step)
+if(!exists("df_anom")) {
+  stop("df_anom (observed anomalies) must exist. It was created during seasonal decomposition.")
+}
+
+# Make sure synthetic anomalies are present
+if(!"anom_T_air" %in% names(synthetic)) {
+  stop("synthetic must contain anomaly columns, e.g., anom_T_air")
+}
+
+# Add doy/hour for grouping
+obsA <- df_anom %>% mutate(doy = yday(time), hour = hour(time))
+synA <- synthetic %>% mutate(doy = yday(time), hour = hour(time))
+
+# Build observed anomaly pools for each doy-hour window
+window_days <- 14
+circ_dist <- function(a,b,N=365) pmin(abs(a-b), N-abs(a-b))
+
+get_pool <- function(target_doy, target_hour) {
+  obsA %>%
+    filter(hour == target_hour) %>%
+    mutate(dd = circ_dist(doy, target_doy)) %>%
+    filter(dd <= window_days) %>%
+    pull(anom_T_air_t)
+}
+
+qm_one <- function(x, pool) {
+  if(is.na(x) || length(pool) < 30) return(x)
+  p <- ecdf(pool)(x)
+  quantile(pool, probs = p, type=8, na.rm=TRUE)
+}
+
+# Vectorized quantile mapping
+synA$T_air_qm <- map2_dbl(synA$T_air,
+                               paste0(synA$doy, "_", synA$hour), 
+                               function(x, key){
+                                 parts <- strsplit(key, "_")[[1]]
+                                 doy <- as.integer(parts[1]); hr <- as.integer(parts[2])
+                                 pool <- get_pool(doy, hr)
+                                 qm_one(x, pool)
+                               })
+
+# Reconstruct corrected physical temperature
+synthetic$T_air <- synA$anom_T_air_qm + synthetic$T_air_seasonal
+
+# Recompute outgoing longwave using Stefan–Boltzmann
+sigma <- 5.670374419e-8
+if(!exists("orig_emissivity")) {
+  orig_emissivity <- mean(df$LWR_out / (sigma * df$T_air^4), na.rm=TRUE)
+  orig_emissivity <- min(max(orig_emissivity, 0.4), 1.0)
+}
+synthetic$LWR_out <- orig_emissivity * sigma * (synthetic$T_air^4)
+
+synthetic_fixed <- synthetic
+
 
 # ---------------------------
 # 7. (Optional) Recompute LWR_out physically for thermodynamic consistency
@@ -681,7 +603,7 @@ combined_df <- bind_rows(orig_plot_df, synth_plot_df)
 plot_list <- lapply(unique(combined_df$variable), function(var_name) {
   df_sub <- combined_df %>% filter(variable == var_name)
   ggplot(df_sub, aes(x = value, fill = source, colour = source)) +
-    geom_density(alpha = 0.2, size = 0.5) +
+    geom_density(alpha = 0.2, linewidth = 0.5) +
     ggtitle(var_name) +
     theme_minimal()
 })
@@ -696,11 +618,11 @@ acf_synth <- acf(na.omit(synthetic$T_air), plot = FALSE)
 # You can plot these in RStudio etc.; we'll produce a simple overlay plot using ggplot
 acf_df <- tibble(lag = acf_orig$lag, orig = acf_orig$acf, synth = acf_synth$acf) %>%
   pivot_longer(-lag, names_to = "series", values_to = "acf")
-ggplot(acf_df, aes(x = lag, y = acf, colour = series)) + geom_line() + ggtitle("ACF: T_air original vs synthetic")
+ggplot(acf_df, aes(x = lag, y = acf, colour = series)) + geom_line() + ggtitle("ACF: T_air original vs synthetic") + theme_bw()
 
 # Cross-correlation heatmap (original vs synthetic) using Pearson cor across variables
-orig_mat <- df %>% select(all_of(plot_vars)) %>% drop_na() %>% as.matrix()
-synth_mat <- synthetic %>% select(all_of(plot_vars)) %>% drop_na() %>% as.matrix()
+orig_mat <- df %>% dplyr::select(all_of(plot_vars)) %>% drop_na() %>% as.matrix()
+synth_mat <- synthetic %>% dplyr::select(all_of(plot_vars)) %>% drop_na() %>% as.matrix()
 cor_orig <- cor(orig_mat, use = "pairwise.complete.obs")
 cor_synth <- cor(synth_mat, use = "pairwise.complete.obs")
 
@@ -725,14 +647,93 @@ message("Created 'synthetic_time_series' tibble in the global environment.")
 # write_csv(synthetic, "synthetic_time_series.csv")
 
 # ---------------------------
-# Notes & next steps
+# Step 11 — Forecast into the future (preserve mean climate)
 # ---------------------------
-# - The script uses residual bootstrap to retain non-Gaussian residual behaviour.
-# - If you want to better preserve tail dependencies across variables, consider:
-#     * fitting a copula to VAR residuals and sampling from that copula
-#     * running the VAR on principal components, or combining VAR + copula on marginals
-# - If your data have trends or nonstationarity, consider differencing or VECM instead of VAR.
-# - If you need conditional scenarios (e.g., force warmer mean), add a shift to seasonal means before reconstruction.
-# - If you want multiple ensemble members, call simulate_VAR_bootstrap multiple times with different seeds.
-#
-# End of script
+# 1) Configure target horizon
+last_obs_time <- max(df$time)           # end of your observed record (e.g., in 2024)
+horizon_year <- 2060                    # target final year
+# Determine timestep (seconds) from existing data (robust for hourly, sub-hourly, daily)
+dt_seconds <- as.numeric(median(diff(sort(df$time)), na.rm = TRUE), units = "secs")
+if(is.na(dt_seconds) || dt_seconds <= 0) dt_seconds <- 3600  # fallback to hourly if weird
+
+future_end <- as.POSIXct(paste0(horizon_year, "-12-31 23:59:59"), tz = tz(last_obs_time))
+# create future time vector starting at next time step after last observation
+future_times <- seq(from = last_obs_time + dt_seconds, to = future_end, by = dt_seconds)
+n_future <- length(future_times)
+message("Simulating ", n_future, " future timesteps from ", as.character(min(future_times)),
+        " to ", as.character(max(future_times)))
+
+# 2) Prepare initial state (last p observations used for fitting)
+p <- var_model$p
+Y_full <- var_model$y          # matrix used in fit (nobs x k)
+# Ensure we have at least p rows
+if(nrow(Y_full) < p) stop("VAR fit contains fewer rows than p. Cannot initialize simulation.")
+init_y <- Y_full[(nrow(Y_full)-p+1):nrow(Y_full), , drop = FALSE]
+
+# 3) Simulate future anomalies using the same bootstrap function (preserves residual distribution)
+# Use the same residuals used for historical simulation (resids object)
+future_anom_mat <- simulate_VAR_bootstrap(
+  var_model = var_model,
+  n_sim     = n_future,
+  init_y    = init_y,
+  resids    = resids,
+  seed      = 999
+)
+
+future_anom <- as_tibble(future_anom_mat)
+# Column names should be like the VAR endogenous names (e.g., "anom_T_air_t", ...)
+
+# 4) Attach time metadata and seasonal means (doy, hour)
+future_df <- future_anom %>%
+  mutate(time = future_times) %>%
+  mutate(doy = yday(time),
+         hour = hour(time))
+
+# join seasonal_means (which has columns like T_air_t_seas, SW_in_t_seas, ..., keyed by doy+hour)
+future_df <- future_df %>%
+  left_join(seasonal_means, by = c("doy", "hour"))
+
+# Quick check for missing seasonal rows (should be none)
+if(any(is.na(future_df[[paste0(vars_t[1], "_seas")]]))) {
+  warning("Some seasonal means are missing for future times (check seasonal_means keys).")
+}
+
+# 5) Reconstruct transformed-space simulated variables
+# For each variable v in vars_t (e.g., "T_air_t"), anom column is "anom_<v>" and seasonal is "<v>_seas"
+for (v in vars_t) {
+  anom_col <- paste0("anom_", v)
+  seas_col <- paste0(v, "_seas")   # e.g., "T_air_t_seas"
+  out_col  <- paste0(v, "_sim_t")  # e.g., "T_air_t_sim_t"
+  if(!all(c(anom_col, seas_col) %in% names(future_df))) {
+    stop("Missing columns when reconstructing: ", anom_col, " or ", seas_col)
+  }
+  future_df[[out_col]] <- future_df[[anom_col]] + future_df[[seas_col]]
+}
+
+# 6) Inverse-transform into physical units (same transforms you used earlier)
+future_physical <- future_df %>%
+  transmute(
+    time = time,
+    T_air = !!sym(paste0("T_air_t_sim_t")),          # Kelvin (identity)
+    SW_in = !!sym(paste0("SW_in_t_sim_t")),
+    LWR_in = !!sym(paste0("LWR_in_t_sim_t")),
+    pressure = !!sym(paste0("pressure_t_sim_t")),
+    # inverse-logit (rh was percent in original data)
+    relative_humidity = plogis(!!sym(paste0("rh_t_sim_t"))) * 100,
+    albedo = plogis(!!sym(paste0("albedo_t_sim_t"))),
+    wind = pmax(!!sym(paste0("wind_t_sim_t")), 0)^2
+  )
+
+# 7) Basic sanity checks
+message("Future physical summary (first/last rows & summary):")
+print(head(future_physical, 3))
+print(tail(future_physical, 3))
+print(summary(dplyr::select(future_physical, -time)))
+
+# 8) Save result to global env and optionally to disk
+assign("future_physical", future_physical, envir = .GlobalEnv)
+# Uncomment to write CSV:
+# readr::write_csv(future_physical, "synthetic_future_physical_2060.csv")
+
+message("Saved `future_physical` to global environment. Length: ", nrow(future_physical),
+        " rows. Time range: ", min(future_physical$time), " -> ", max(future_physical$time))    

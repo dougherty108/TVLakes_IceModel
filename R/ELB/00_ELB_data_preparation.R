@@ -105,20 +105,7 @@ shortwave_radiation_initial <- BOYM |>
   dplyr::select(metlocid, date_time, swradin_wm2) |> 
   mutate(swradin_wm2 = ifelse(is.na(swradin_wm2), TARM$swradin_wm2, swradin_wm2)) # replace empty shortwave data with TARM, nearest met station
 
-# create an artificial shortwave object
-# Coordinates of East Lobe Bonney Blue Box
-latitude <- -77.13449
-longitude <- 162.449716
-
-artificial_shortwave <- tibble(
-  date_time = time_model, 
-  zenith = 90 - getSunlightPosition(time_model, lat = latitude, lon = longitude)$altitude, #convert to zenith by subtracting the altitude from 90 degrees. 
-  sw = S*cos(zenith)*3.0) # multiplied by 3 to make data better match historical mean.
-
-shortwave_radiation <- shortwave_radiation_initial |> 
-  left_join(artificial_shortwave, by = "date_time") |>    # Join on date_time
-  mutate(swradin_wm2 = ifelse(is.na(swradin_wm2), sw, swradin_wm2)) |>   # Fill missing values
-  dplyr::select(-sw)  |> # Remove extra column
+shortwave_radiation <- shortwave_radiation_initial |>   # Fill missing values
   filter(swradin_wm2 > 0)
 
 
@@ -230,7 +217,7 @@ time_15min <- tibble(time = seq(from = start_time, to = end_time, by = "15 mins"
 
 # Join 15-minute grid with original data
 albedo1 <- time_15min |> 
-  left_join(albedo_orig |> select(date, albedo.predict.bb), by = c("time" = "date")) |> 
+  left_join(albedo_orig |> dplyr::select(date, albedo.predict.bb), by = c("time" = "date")) |> 
   arrange(time) |> 
   fill(albedo.predict.bb, .direction = "down")
 
@@ -316,7 +303,7 @@ if (length(airt_interp) != length(time_model) |
 
 
 ###################### Create the time series tibble for model time ######################
-time_series <- tibble(
+time_series_actual <- tibble(
   time = time_model,                           # Model time steps
   T_air = airt_interp,                         # Interpolated air temperature Kelvin
   SW_in = sw_interp,                           # Interpolated shortwave radiation w/m2
