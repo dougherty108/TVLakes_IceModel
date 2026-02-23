@@ -83,5 +83,50 @@ ggplot(profile_corrected, aes(TIMESTAMP, value_corrected, color = name)) +
   ) + 
   theme_bw()
 
+#### pull in Air Temp dataset from this past season (BOYM and ELBBB) and compare, what's going on?
+ELBBB <- read_delim('Data/ice_thermal_profile/ELB_CR1000X_reconfig_25_ELB15min.dat', 
+                    delim = ",", 
+                    skip = 1) |> 
+  mutate(across(2:24, ~ as.numeric(.)), 
+         TIMESTAMP = ymd_hms(TIMESTAMP))
+
+# filter down to just the airtemp and timestamp, and join to the temp_profile object
+
+temp_air_ice = ELBBB |> 
+  select(TIMESTAMP, Air_Temp_Avg, Temp_stg_Avg) |> 
+  left_join(profile_corrected, by = join_by(TIMESTAMP)) |> 
+  drop_na(RECORD)
 
 
+ggplot(temp_air_ice, aes(TIMESTAMP, value_corrected, color = name)) +
+  geom_path() +
+  scale_color_brewer(palette = "Spectral") +
+  labs(
+    title = "Calibrated Ice Thermal Profile",
+    x = "Timestamp",
+    y = "Temperature (°C)",
+    color = "Depth (cm)"
+  ) + 
+  geom_line(aes(TIMESTAMP, Air_Temp_Avg), color = "RED") + 
+  theme_bw()
+
+## directly plot air temperature against ice thermal temp
+temp_air_ice |> 
+  filter(TIMESTAMP > "2025-06-15 00:00:00") |>
+  ggplot(aes(Air_Temp_Avg, value)) + 
+  geom_point(shape = 21) + 
+  geom_smooth(method = "lm") + 
+  facet_wrap(vars(name))
+
+# For portions of ice closer to the atmosphere, air temp is more strongly correlated 
+# with ice temperature. But what about the lower sections, nearer the water column?
+# plot water temp against ice column temp
+temp_air_ice |> 
+  filter(TIMESTAMP > "2025-06-15 00:00:00") |>
+  ggplot(aes(Temp_stg_Avg, value)) + 
+  geom_point(shape = 21) + 
+  geom_smooth(method = "lm") + 
+  facet_wrap(vars(name))
+
+ggplot(temp_air_ice, aes(TIMESTAMP, Temp_stg_Avg)) + 
+  geom_path()

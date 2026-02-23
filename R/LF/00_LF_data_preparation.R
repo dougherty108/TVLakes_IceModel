@@ -39,7 +39,7 @@ EXEM <-  read_csv("~/Library/CloudStorage/OneDrive-UCB-O365/Documents/MCM-LTER_M
 
 ###################### Define Parameters ######################
 L_initial <- 4.60       # Initial ice thickness (m) Ice thickness at 12/17/2016 ice to ice
-dx <- 0.10              # Spatial step size (m)
+dx <- 0.01              # Spatial step size (m)
 nx = L_initial/dx       # Number of spatial steps
 dt <-  1/24             # Time step for stability (in days)
 nt <- (1/dt)*6.95*365.   # Number of time steps
@@ -342,3 +342,4 @@ time_series <- tibble(
   relative_humidity = relative_humidity_interp # relative humidity
 ) |> 
   drop_na(delta_T) # removes the first row where the difference in temperatures yields NA
+

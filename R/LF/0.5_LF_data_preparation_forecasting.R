@@ -799,4 +799,3 @@ assign("future_physical", future_physical, envir = .GlobalEnv)
 
 message("Saved `future_physical` to global environment. Length: ", nrow(future_physical),
         " rows. Time range: ", min(future_physical$time), " -> ", max(future_physical$time))    
-

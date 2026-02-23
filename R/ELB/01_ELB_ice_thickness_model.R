@@ -17,11 +17,11 @@
 library(tidyverse)
 library(lubridate)
 library(progress)
-library(suncalc) # might not need this one here
 
 
 # call the data preparation script
 source("R/ELB/00_ELB_data_preparation.R")
+source("R/ELB/0.5_ELB_data_preparation_forecasting.R")
 
 ###################### PLOT INPUT DATA ######################
 # plot input data to check for funny business
@@ -252,3 +252,4 @@ results |>
   ggtitle("East Lake Bonney", 
           subtitle = "Using synthetic VAR data past 2023.") +
   theme_linedraw(base_size = 20)
+

@@ -12,11 +12,20 @@
 # Data is provided primarily by the McMurdo Dry Valleys Long Term Ecological Research project, with albedo surface estimates coming from 
 # derived surface sediment maps over the McMurdo Dry Valleys Lakes using Landsat 8 data. 
 
+time_series = future_physical
+
+time_series <- time_series %>%
+  mutate(
+    LWR_out = emissivity * sigma * (T_air^4),  # outgoing longwave flux
+    delta_T = T_air - lag(T_air)
+  ) |> 
+  rbind(time_series_actual)  |> 
+  drop_na(delta_T)
 
 ###################### PLOT INPUT DATA ######################
 series <- time_series |> 
   pivot_longer(cols = c(T_air, SW_in, LWR_in, LWR_out, pressure, albedo, relative_humidity, wind), 
-               names_to = "variable", values_to = "data")
+               names_to = "variable", values_to = "data")  
 
 ggplot(series, aes(time, data)) + 
   geom_line(size = 1.5) + 
@@ -66,7 +75,7 @@ for (t_idx in 1:nrow(time_series)) {
   
   #store results for time step
   results$time[t_idx] <- time_series$time[t_idx]
-  results$depth[t_idx] <- depth
+  #results$depth[t_idx] <- depth
   results$temperature[t_idx] <- prevT
   results$thickness[t_idx] <- prevL
   results$LW_net[t_idx] <- LW_net
@@ -75,7 +84,7 @@ for (t_idx in 1:nrow(time_series)) {
   results$sensible_Q[t_idx] <- Qh
   results$latent_Q[t_idx] <- Ql
   results$conductive_Q[t_idx] <- Qc
-  results$surface_heat_flux[t_idx] <- surface_flux
+  #results$surface_heat_flux[t_idx] <- surface_flux
   results$Iteration[t_idx] <- t_idx  
   
   #ice thickness
@@ -157,7 +166,7 @@ for (t_idx in 1:nrow(time_series)) {
     Ql = rho_air*(xLatent)*Ce*(0.622/press)*(ea - es0)*wind
   }
   
-  Qc = (k * (prevT[1] - T_air) / dx)
+  Qc = (k_const * (prevT[1] - T_air) / dx)
   
   # Surface heat flux (absorbed shortwave, net longwave, conductive heat flux, sensible heat flux, and latent heat flux)
   surface_flux <- SW_abs + (LW_net - Qc) + Qh + Ql 
@@ -170,7 +179,7 @@ for (t_idx in 1:nrow(time_series)) {
   
   # Calculate freezing/melting at the bottom
   if (!is.na(newL) && newL > 0) {
-    Q_bottom <- -k * (newT[length(newT) - 1] - newT[length(newT)]) / dx
+    Q_bottom <- -k_const * (newT[length(newT) - 1] - newT[length(newT)]) / dx
     dL_bottom <- Q_bottom * (dt * 86400) / (rho * L_f)
     newL <- newL + dL_bottom
   }

@@ -3,6 +3,10 @@
 #set working directory
 setwd("~chdo4929")
 
+library(tidyverse)
+library(lubridate)
+library(progress)
+
 
 ###################### Load Time Series Data by Station ######################
 # met station data can be found at the McMurdo Long Term Ecological Research website or on the Environmental Data Initiative
