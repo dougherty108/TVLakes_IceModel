@@ -39,7 +39,7 @@ EXEM <-  read_csv("~/Library/CloudStorage/OneDrive-UCB-O365/Documents/MCM-LTER_M
 
 ###################### Define Parameters ######################
 L_initial <- 4.60       # Initial ice thickness (m) Ice thickness at 12/17/2016 ice to ice
-dx <- 0.01              # Spatial step size (m)
+dx <- 0.10              # Spatial step size (m)
 nx = L_initial/dx       # Number of spatial steps
 dt <-  1/24             # Time step for stability (in days)
 nt <- (1/dt)*6.95*365.   # Number of time steps
@@ -243,7 +243,7 @@ time_15min <- tibble(time = seq(from = start_time, to = end_time, by = "15 mins"
 
 # Join 15-minute grid with original data
 albedo1 <- time_15min |> 
-  left_join(albedo_orig |> select(date, albedo.predict.bb), by = c("time" = "date")) |> 
+  left_join(albedo_orig |> dplyr::select(date, albedo.predict.bb), by = c("time" = "date")) |> 
   arrange(time) |> 
   fill(albedo.predict.bb, .direction = "down")
 

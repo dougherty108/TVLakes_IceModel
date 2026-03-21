@@ -713,7 +713,7 @@ message("Created 'synthetic_time_series' tibble in the global environment.")
 # ---------------------------
 # 1) Configure target horizon
 last_obs_time <- max(df$time)           # end of your observed record (e.g., in 2024)
-horizon_year <- 2050                   # target final year
+horizon_year <- 2037                    # target final year
 # Determine timestep (seconds) from existing data (robust for hourly, sub-hourly, daily)
 dt_seconds <- as.numeric(median(diff(sort(df$time)), na.rm = TRUE), units = "secs")
 if(is.na(dt_seconds) || dt_seconds <= 0) dt_seconds <- 3600  # fallback to hourly if weird
