@@ -14,9 +14,9 @@ source("R/ELB/00_ELB_data_preparation.R")
 # 1. Prepare and sanity-check
 # ---------------------------
 # Ensure your tibble is present
-if(!exists("time_series_actual")) stop("time_series_actual object not found. Please load it before running this script.")
+if(!exists("time_series_ELB")) stop("time_series_ELB object not found. Please load it before running this script.")
 
-df <- time_series_actual %>%
+df <- time_series_ELB %>%
   arrange(time) %>%
   mutate(time = as.POSIXct(time, tz = "UTC")) # adjust tz if needed
 

@@ -29,31 +29,46 @@ source("R/ELB/0.5_ELB_data_preparation_forecasting.R")
 
 time_series = future_physical
 
+time_series = time_series |> 
+  mutate(
+    LWR_out = emissivity * sigma * (T_air^4),  # outgoing longwave flux
+    delta_T = T_air - lag(T_air)
+  ) |> 
+  rbind(time_series_ELB)  |> 
+  drop_na(delta_T) |> 
+  arrange(time)
+
+## apply warming 
+baseline_year <- min(year(time_series$time))
+warming_rate <- 0.003  # 0.3% per year
+
+# Apply compounding warming
+time_series <- time_series %>%
+  mutate(
+    year = year(time),
+    years_elapsed = year - baseline_year,
+    warming_multiplier = (1 + warming_rate)^years_elapsed,
+    T_air = T_air * warming_multiplier
+  )
+
+
 # Stefan–Boltzmann constant
 sigma <- 5.67e-8  # W/m2/K4
 
 # ice surface emissivity (approx.)
 emissivity <- 0.97
 
-# Compute LWR_out (assume surface at freezing point unless melted)
-time_series <- time_series %>%
-  mutate(
-    LWR_out = emissivity * sigma * (T_air^4),  # outgoing longwave flux
-    delta_T = T_air - lag(T_air)
-  ) |> 
-  rbind(time_series_actual)
-
-L_initial <- 3.30       # Initial ice thickness (m) Ice thickness at 12/17/2016 ice to ice
+L_initial <- 3.88       # Initial ice thickness (m) Ice thickness at 12/17/2016 ice to ice
 
 series <- time_series |> 
   pivot_longer(cols = c(T_air, SW_in, LWR_in, LWR_out, pressure, albedo, relative_humidity, wind), 
                names_to = "variable", values_to = "data")
 
-ggplot(series, aes(time, data)) + 
-  geom_path(size = 0.5) + 
-  xlab("Date") + ylab("Input Data") +
-  facet_wrap(vars(variable), scales = "free") + 
-  theme_linedraw(base_size = 15)
+#ggplot(series, aes(time, data)) + 
+#  geom_path(size = 0.5) + 
+##  xlab("Date") + ylab("Input Data") +
+#  facet_wrap(vars(variable), scales = "free") + 
+#  theme_linedraw(base_size = 15)
 
 
 ###################### MODEL BEGINS ######################
@@ -250,6 +265,9 @@ results |>
   ) +
   geom_point(data = ice_thickness, aes(x = date_time, y = z_water_m)) + 
   ggtitle("East Lake Bonney", 
-          subtitle = "Using synthetic VAR data past 2023.") +
+          subtitle = "0.3% annual warming T_air"
+          ) +
   theme_linedraw(base_size = 20)
 
+
+# profvis package, could be helpful for optimization 

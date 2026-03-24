@@ -42,7 +42,7 @@ L_initial <- 4.60       # Initial ice thickness (m) Ice thickness at 12/17/2016 
 dx <- 0.10              # Spatial step size (m)
 nx = L_initial/dx       # Number of spatial steps
 dt <-  1/24             # Time step for stability (in days)
-nt <- (1/dt)*6.95*365.   # Number of time steps
+nt <- (1/dt)*20*365.   # Number of time steps
 
 sigma = 5.67e-8         # stefan boltzman constant
 R = 8.314462            # Universal gas constant kg⋅m^2⋅s^-2⋅K^-1⋅mol^-1
@@ -58,10 +58,10 @@ xLv = 2.500e6           # Latent Heat of Evaporation (J/kg)
 xLf = 3.34e5            # Latent Heat of Fusion (J/kg)
 
 xLs = xLv + xLf         # Latent Heat of Sublimation
-k <- 2.3                # Thermal conductivity of ice (W/m/K)
+k_const <- 2.3                # Thermal conductivity of ice (W/m/K)
 rho <- 917              # Density of ice (kg/m^3)
 c <- 2100               # Specific heat capacity of ice (J/kg/K)
-alpha <- k / (rho * c)  # Thermal diffusivity (m^2/s)
+alpha <- k_const / (rho * c)  # Thermal diffusivity (m^2/s)
 L_f <- xLf  
 Chi = 0.4               # Solar Absorption constant (adustable)             
 
@@ -329,7 +329,7 @@ if (length(airt_interp) != length(time_model) |
 
 
 ###################### Create the time series tibble for model time ######################
-time_series <- tibble(
+time_series_LF <- tibble(
   time = time_model,                           # Model time steps
   T_air = airt_interp,                         # Interpolated air temperature Kelvin
   SW_in = sw_interp,                           # Interpolated shortwave radiation w/m2

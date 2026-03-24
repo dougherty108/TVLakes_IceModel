@@ -8,15 +8,15 @@ library(tidyverse); library(lubridate); library(zoo); library(vars)
 library(copula); library(ggplot2); library(reshape2); library(gridExtra); library(scales)
 
 # pull and collate input met data
-source("R/ELB/00_ELB_data_preparation.R")
+source("R/LF/00_LF_data_preparation.R")
 
 # ---------------------------
 # 1. Prepare and sanity-check
 # ---------------------------
 # Ensure your tibble is present
-if(!exists("time_series_actual")) stop("time_series_actual object not found. Please load it before running this script.")
+if(!exists("time_series_LF")) stop("time_series_LF object not found. Please load it before running this script.")
 
-df <- time_series_actual %>%
+df <- time_series_LF %>%
   arrange(time) %>%
   mutate(time = as.POSIXct(time, tz = "UTC")) # adjust tz if needed
 
@@ -557,7 +557,7 @@ print(head(filled_counts, 10))
 # 6) Join anomalies and seasonal T into synthetic
 # ensure synthetic has doy/hour
 if(!"doy" %in% names(synthetic_fixed)) synthetic <- synthetic_fixed %>% mutate(doy = yday(time))
-if(!"hour" %in% names(synthetic_fixed)) synthetic_fixed <- synthetic_fixed %>% mutate(hour = hour(time))
+ if(!"hour" %in% names(synthetic_fixed)) synthetic_fixed <- synthetic_fixed %>% mutate(hour = hour(time))
 
 # Determine seasonal column name in df_anom (common variants)
 seas_candidates <- c("T_air_t_seas","T_air_seasonal","T_air_seas","T_air_t_season_mean")
@@ -586,7 +586,7 @@ synthetic_fixed <- synthetic_fixed %>% mutate(T_air_raw = anom_T_air_t + T_air_t
 
 # 8) Quantile mapping on anomalies (seasonal window)
 obsA <- df_anom2 %>% dplyr::select(time, doy, hour, anom_T_air_t)
-window_days <- 14
+window_days <- 7
 circ_dist <- function(a,b,N=365) pmin(abs(a-b), N-abs(a-b))
 
 get_pool <- function(target_doy, target_hour) {
@@ -799,3 +799,4 @@ assign("future_physical", future_physical, envir = .GlobalEnv)
 
 message("Saved `future_physical` to global environment. Length: ", nrow(future_physical),
         " rows. Time range: ", min(future_physical$time), " -> ", max(future_physical$time))    
+

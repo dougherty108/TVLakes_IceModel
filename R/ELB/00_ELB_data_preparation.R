@@ -307,7 +307,7 @@ if (length(airt_interp) != length(time_model) |
 
 
 ###################### Create the time series tibble for model time ######################
-time_series_actual <- tibble(
+time_series_ELB <- tibble(
   time = time_model,                           # Model time steps
   T_air = airt_interp,                         # Interpolated air temperature Kelvin
   SW_in = sw_interp,                           # Interpolated shortwave radiation w/m2

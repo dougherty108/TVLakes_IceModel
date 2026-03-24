@@ -20,19 +20,34 @@ time_series <- time_series %>%
     LWR_out = emissivity * sigma * (T_air^4),  # outgoing longwave flux
     delta_T = T_air - lag(T_air)
   ) |> 
-  rbind(time_series_actual)  |> 
-  drop_na(delta_T)
+  rbind(time_series_LF)  |> 
+  drop_na(delta_T) |> 
+  arrange(time)
+
+## apply warming 
+baseline_year <- min(year(time_series$time))
+warming_rate <- 0.003  # 0.1% per year
+
+# Apply compounding warming
+time_series <- time_series %>%
+  mutate(
+    year = year(time),
+    years_elapsed = year - baseline_year,
+    warming_multiplier = (1 + warming_rate)^years_elapsed,
+    T_air = T_air * warming_multiplier
+  )
+  
 
 ###################### PLOT INPUT DATA ######################
 series <- time_series |> 
   pivot_longer(cols = c(T_air, SW_in, LWR_in, LWR_out, pressure, albedo, relative_humidity, wind), 
                names_to = "variable", values_to = "data")  
 
-ggplot(series, aes(time, data)) + 
-  geom_line(size = 1.5) + 
-  xlab("Date") + ylab("Input Data") +
-  facet_wrap(vars(variable), scales = "free") + 
-  theme_linedraw(base_size = 15)
+#ggplot(series, aes(time, data)) + 
+#  geom_line(size = 1.5) + 
+#  xlab("Date") + ylab("Input Data") +
+#  facet_wrap(vars(variable), scales = "free") + 
+#  theme_linedraw(base_size = 15)
 
 
 ###################### MODEL BEGINS ######################
