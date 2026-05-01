@@ -300,6 +300,5 @@ inputs <- prepare_elb_model_inputs(
   albedo_orig   = albedo_raw
 )
 
-# ---- Run model ----
-results <- run_ice_model(inputs$time_series)
+
 
