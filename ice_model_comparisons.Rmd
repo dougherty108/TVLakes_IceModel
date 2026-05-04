@@ -1,0 +1,180 @@
+---
+title: "ice_model_output_comparisons"
+output: html_document
+date: "2026-05-01"
+---
+
+```{r setup, message = FALSE}
+source("R/TEST_Optimizations/libraries.R")
+source("R/TEST_Optimizations/functions.R")
+```
+
+```{r define_paths_and_constants}
+# ---- File paths ----
+PATHS <- list(
+  boym      = "~/Library/CloudStorage/OneDrive-UCB-O365/Documents/MCM-LTER_Met/met stations/mcmlter-clim_boym_15min-20250205.csv",
+  hoem      = "~/Library/CloudStorage/OneDrive-UCB-O365/Documents/MCM-LTER_Met/met stations/mcmlter-clim_hoem_15min-20250205.csv",
+  cohm      = "~/Library/CloudStorage/OneDrive-UCB-O365/Documents/MCM-LTER_Met/met stations/mcmlter-clim_cohm_15min-20250205.csv",
+  tarm      = "~/Library/CloudStorage/OneDrive-UCB-O365/Documents/MCM-LTER_Met/met stations/mcmlter-clim_tarm_15min-20250205.csv",
+  airt_elb  = "Data/air_temp_ELBBB.csv",
+  airt_wlb  = "Data/air_temp_WLBBB.csv",
+  ice       = "Data/mcmlter-lake-ice_thickness-20250218_0_2025.csv",
+  albedo    = "Data/AlbedoModel.csv"
+)
+
+# ---- Physical and model constants (single source of truth) ----
+k_ice <- 2.3
+rho_ice <- 917
+c_ice <- 2100
+
+CONSTANTS <- list(
+  # Thermodynamic
+  sigma      = 5.67e-8,
+  emissivity = 0.97,
+  Tf         = 273.15,
+  L_f        = 334000,
+  xLv        = 2.501e6,
+  xLs        = 2.834e6,
+  # Ice properties
+  k          = k_ice,
+  rho        = rho_ice,
+  alpha      = k_ice / (rho_ice * c_ice),
+  # Atmospheric
+  R          = 8.314,
+  Ma         = 0.029,
+  Ca         = 1005,
+  epsilon    = 0.622,
+  # Bulk transfer
+  Ch         = 1.3e-3,
+  Ce         = 1.3e-3,
+  Chi        = 0.43,
+  # Model grid
+  dx         = 0.10,
+  dt         = 1/24,
+  L_initial  = 3.60
+)
+
+# ---- Temporal filters ----
+start_filter   <- as.POSIXct("2016-12-21 00:00:00")
+wlb_end_filter <- as.POSIXct("2023-11-01 00:00:00")
+lwr_extend_to  <- as.POSIXct("2025-01-31 23:45:00")
+ice_start      <- as.POSIXct("2016-12-01")
+ice_end        <- as.POSIXct("2024-02-01")
+lake_name      <- "East Lake Bonney"
+```
+
+```{r load_data, warning = FALSE, message = FALSE}
+BOYM       <- read_csv(PATHS$boym)
+HOEM       <- read_csv(PATHS$hoem)
+COHM       <- read_csv(PATHS$cohm)
+TARM       <- read_csv(PATHS$tarm)
+airt_elb   <- read_csv(PATHS$airt_elb)
+airt_wlb   <- read_csv(PATHS$airt_wlb)
+albedo_raw <- read_csv(PATHS$albedo)
+ice_raw    <- read_csv(PATHS$ice)
+```
+
+```{r observed_pathway, warning = FALSE}
+# Prepare observed inputs, apply no warming
+inputs      <- prepare_elb_model_inputs(
+  BOYM, HOEM, COHM, TARM,
+  airt_elb, airt_wlb,
+  ice_raw, albedo_raw,
+  constants      = CONSTANTS,
+  start_filter   = start_filter,
+  wlb_end_filter = wlb_end_filter,
+  lwr_extend_to  = lwr_extend_to,
+  ice_start      = ice_start,
+  ice_end        = ice_end,
+  n_years        = 6.95,
+  lake_name      = lake_name
+)
+
+prepped_obs <- prepare_model_input(inputs$time_series,
+                                   warming_rate = 0.000,
+                                   constants    = CONSTANTS)
+results_obs <- run_ice_model(prepped_obs, constants = CONSTANTS)
+```
+
+```{r scenario_pathway, warning = FALSE}
+# Build climatology-based scenario, apply no warming or offsets
+clim_scenario <- build_climate_scenario(
+  BOYM      = BOYM,
+  HOEM      = HOEM,
+  COHM      = COHM,
+  airt_elb  = airt_elb,
+  airt_wlb  = airt_wlb,
+  albedo_df = albedo_raw,
+  constants      = CONSTANTS,
+  wlb_end_filter = wlb_end_filter,
+  lake_name      = lake_name,
+  year_start     = 2024,
+  year_end       = 2050,
+  flat_offsets        = list(),   # no offsets — baseline scenario
+  seasonal_adjustments = list()   # no adjustments — baseline scenario
+)
+
+prepped_scen <- prepare_model_input(clim_scenario,
+                                    warming_rate = 0.000,
+                                    constants    = CONSTANTS)
+results_scen <- run_ice_model(prepped_scen, constants = CONSTANTS)
+```
+
+```{r plot_observed}
+# plot_scenario expects a raw scenario/prepped df with T_air, SW_in etc.
+# Use inputs$time_series for the observed input plot, not prepped_obs
+# (prepped_obs has delta_T added but is otherwise the same)
+plot_scenario(inputs$time_series,
+              scenario_label = "Observed (no warming)",
+              smooth = "month")
+
+plot_ice_model(results_obs,
+               ice_thickness = inputs$ice_thickness,
+               title = "East Lake Bonney — Observed",
+               smooth = "week")
+```
+
+```{r plot_scenario}
+plot_scenario(clim_scenario,
+              scenario_label = "Baseline scenario 2024–2050",
+              smooth = "month")
+
+plot_ice_model(results_scen,
+               title = "East Lake Bonney — Baseline scenario",
+               subtitle = "No warming applied | Climatological forcing 2024–2050",
+               smooth = "month")
+```
+```{r}
+clim_scenario_warm_1 <- build_climate_scenario(
+  BOYM      = BOYM,
+  HOEM      = HOEM,
+  COHM      = COHM,
+  airt_elb  = airt_elb,
+  airt_wlb  = airt_wlb,
+  albedo_df = albedo_raw,
+  constants      = CONSTANTS,
+  wlb_end_filter = wlb_end_filter,
+  lake_name      = lake_name,
+  year_start     = 2024,
+  year_end       = 2050,
+  flat_offsets        = list(),   # no offsets — baseline scenario
+  seasonal_adjustments = list()   # no adjustments — baseline scenario
+)
+
+scen_warm <- prepare_model_input(clim_scenario_warm_1,
+                                    warming_rate = 0.005,
+                                    constants    = CONSTANTS)
+
+results_warm_1 <- run_ice_model(scen_warm, constants = CONSTANTS)
+
+plot_scenario(clim_scenario_warm_1,
+              scenario_label = "1% warming scenario 2024–2050",
+              smooth = "month")
+
+plot_ice_model(results_scen,
+               title = "East Lake Bonney",
+               subtitle = "1% Warming | Climatological forcing 2024–2050",
+               smooth = "month")
+
+```
+
