@@ -157,23 +157,25 @@ clim_scenario_warm_1 <- build_climate_scenario(
   lake_name      = lake_name,
   year_start     = 2024,
   year_end       = 2050,
-  flat_offsets        = list(),   # no offsets — baseline scenario
+  flat_offsets        = list(
+    #air_temp = 1
+    ),   # no offsets — baseline scenario
   seasonal_adjustments = list()   # no adjustments — baseline scenario
 )
 
 scen_warm <- prepare_model_input(clim_scenario_warm_1,
-                                    warming_rate = 0.005,
+                                    warming_rate = 0.50 ,
                                     constants    = CONSTANTS)
 
 results_warm_1 <- run_ice_model(scen_warm, constants = CONSTANTS)
 
-plot_scenario(clim_scenario_warm_1,
-              scenario_label = "1% warming scenario 2024–2050",
+plot_scenario(scen_warm,
+              scenario_label = "50% warming scenario 2024–2050",
               smooth = "month")
 
-plot_ice_model(results_scen,
+plot_ice_model(results_warm_1,
                title = "East Lake Bonney",
-               subtitle = "1% Warming | Climatological forcing 2024–2050",
+               subtitle = "50% Warming | Climatological forcing 2024–2050",
                smooth = "month")
 
 ```

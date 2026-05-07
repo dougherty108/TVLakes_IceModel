@@ -345,33 +345,29 @@ build_climate_scenario <- function(
     make_hourly_climatology(df, col)
   })
   
-  # ---- 3. Albedo climatology (smooth seasonal trend) ----------------------
+  # ---- 3. Albedo climatology (physically parameterized seasonal curve) -----
   message("Preparing albedo climatology...")
   
-  albedo_clean <- albedo_df |>
-    filter(lake == lake_name) |>
-    mutate(date_time = ymd(sed.date), yday = yday(date_time)) |>
-    drop_na(albedo.predict.bb)
+  # Antarctic lake ice albedo:
+  # - peaks in austral summer (late December / early January) 
+  #   when fresh snow covers the ice surface
+  # - troughs in austral winter (July/August)
+  #   when bare, sediment-laden ice is exposed
   
-  albedo_doy <- albedo_clean |>
-    group_by(yday) |>
-    summarize(value = mean(albedo.predict.bb, na.rm = TRUE), .groups = "drop") |>
-    arrange(yday)
+  target_min <- 0.28
+  target_max <- 0.67
+  midpoint   <- (target_max + target_min) / 2   # 0.475
+  amplitude  <- (target_max - target_min) / 2   # 0.195
+  peak_yday  <- 8   # approximately January 8
   
-  pad    <- 15
-  n_doy  <- nrow(albedo_doy)
-  padded <- bind_rows(
-    albedo_doy |> tail(pad) |> mutate(yday = yday - 366),
-    albedo_doy,
-    albedo_doy |> head(pad) |> mutate(yday = yday + 365)
-  )
-  
-  smoothed_vals <- stats::filter(padded$value,
-                                 rep(1 / (2 * pad + 1), 2 * pad + 1),
-                                 sides = 2)
-  
-  albedo_clim <- albedo_doy |>
-    mutate(value = as.numeric(smoothed_vals)[(pad + 1):(pad + n_doy)]) |>
+  albedo_clim <- tibble(yday = 1:365) |>
+    mutate(
+      value = midpoint +
+        amplitude       * cos(2 * pi * (yday - peak_yday) / 365) +
+        amplitude * 0.1 * cos(4 * pi * (yday - peak_yday) / 365)
+    ) |>
+    # safety clip in case 2nd harmonic nudges values outside bounds
+    mutate(value = pmax(target_min, pmin(target_max, value))) |>
     crossing(hour = 0:23)
   
   # ---- 4. Time spine ------------------------------------------------------
@@ -463,7 +459,7 @@ prepare_model_input <- function(
     baseline_year <- min(year(time_series$time))
     time_series <- time_series |>
       mutate(
-        T_air = T_air * (1 + warming_rate)^(year(time) - baseline_year)
+        T_air = T_air + warming_rate * (year(time) - baseline_year)
       )
   }
   
@@ -471,10 +467,6 @@ prepare_model_input <- function(
 }
 
 
-# ============================================================
-# run_ice_model
-# — pure physics; no pre-processing, no warming applied here
-# ============================================================
 run_ice_model <- function(
     time_series,
     constants     = CONSTANTS,
@@ -540,9 +532,9 @@ run_ice_model <- function(
   out_temperature  <- vector("list", n_iter)
   
   # Initialise state
-  prevL <- L_initial
-  depth <- seq(0, L_initial, by = dx)
-  prevT <- seq(from = v_T_air[1], to = Tf, length.out = length(depth))
+  prevL      <- L_initial
+  depth      <- seq(0, L_initial, by = dx)
+  prevT      <- seq(from = v_T_air[1], to = Tf, length.out = length(depth))
   dL_surface <- 0
   dL_bottom  <- 0
   
@@ -568,14 +560,17 @@ run_ice_model <- function(
     n_nodes <- length(prevT)
     newT    <- prevT
     
-    # Heat diffusion
+    # -- 4b. Heat diffusion -------------------------------------------------
     if (n_nodes >= 3) {
       interior <- 2:(n_nodes - 1)
       newT[interior] <- prevT[interior] +
         r * (prevT[interior + 1] - 2 * prevT[interior] + prevT[interior - 1])
     }
     
-    # Boundary conditions
+    # catch any NAs introduced by diffusion (e.g. from NA forcing values)
+    if (any(is.na(newT))) newT <- prevT
+    
+    # -- 4c. Boundary conditions --------------------------------------------
     if (n_nodes >= 2) {
       newT[1]       <- T_air
       newT[n_nodes] <- Tf
@@ -583,12 +578,15 @@ run_ice_model <- function(
       newT[1] <- T_air
     }
     
-    # Fluxes
-    SW_abs  <- (1 - Chi) * SW_in * (1 - albedo)
-    LW_net  <- LWR_in - LWR_out
+    # -- 4d. Radiative fluxes -----------------------------------------------
+    SW_abs <- (1 - Chi) * SW_in * (1 - albedo)
+    LW_net <- LWR_in - LWR_out
+    
+    # -- 4e. Sensible heat flux ---------------------------------------------
     rho_air <- (press * Ma) * 0.1 / (R * T_air)
     Qh      <- rho_air * Ca * Ch * delta_T * wind
     
+    # -- 4f. Latent heat flux (phase-dependent) -----------------------------
     if (length(newT) > 0 && newT[1] >= Tf) {
       A <- 6.1121; B <- 17.502; C <- 240.97; xLatent <- xLv
     } else {
@@ -604,8 +602,11 @@ run_ice_model <- function(
       (A * exp((B * T_ref) / (C + T_ref))) / 100
     }
     Ql <- rho_air_lat * xLatent * Ce * (0.622 / press) * (ea - es0) * wind
-    Qc <- k * (prevT[1] - T_air) / dx
     
+    # -- 4g. Conductive flux ------------------------------------------------
+    Qc <- if (length(prevT) >= 1) k * (prevT[1] - T_air) / dx else 0
+    
+    # -- 4h. Net surface flux and mass balance ------------------------------
     surface_flux <- SW_abs + (LW_net - Qc) + Qh + Ql
     
     dL_surface <- 0
@@ -624,23 +625,41 @@ run_ice_model <- function(
     
     newL <- max(0, newL)
     
-    if (newL > 0) {
+    # -- 4i. Regrid temperature profile to new thickness -------------------
+    if (newL > 0 && prevL > 0 && length(newT) >= 2 && !all(is.na(newT))) {
       newdepth <- seq(0, newL, by = dx)
-      newT     <- approx(
-        x    = seq(0, prevL, length.out = length(depth)),
-        y    = newT,
-        xout = seq(0, newL, length.out = length(newdepth)),
-        rule = 2
-      )$y
-    } else {
+      old_grid <- seq(0, prevL, length.out = length(depth))
+      
+      if (length(unique(old_grid)) >= 2 && length(newdepth) >= 2) {
+        # normal case: interpolate onto new grid
+        newT <- approx(
+          x    = old_grid,
+          y    = newT,
+          xout = seq(0, newL, length.out = length(newdepth)),
+          rule = 2
+        )$y
+      } else {
+        # ice too thin to interpolate — hold mean temperature
+        newT <- rep(mean(newT, na.rm = TRUE), length(newdepth))
+      }
+      
+    } else if (newL <= 0) {
+      # no ice remaining
       newdepth <- NA_real_
       newT     <- numeric(0)
+      
+    } else {
+      # newT was all NA or length < 2 — reset to linear gradient as fallback
+      newdepth <- seq(0, newL, by = dx)
+      newT     <- seq(from = T_air, to = Tf, length.out = length(newdepth))
     }
     
+    # -- 4j. Advance state --------------------------------------------------
     prevT <- newT
     prevL <- newL
     depth <- newdepth
     
+    # -- 4k. Store outputs --------------------------------------------------
     out_thickness[t_idx]    <- prevL
     out_LW_net[t_idx]       <- LW_net
     out_SW[t_idx]           <- SW_in
