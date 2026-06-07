@@ -1,50 +1,50 @@
-###### Climatological forecasting — Lake Fryxell (LF) ########
+###### Climatological forecasting — West Lake Bonney (WLB) ########
 
 ### Authors
 # Charlie Dougherty
 
 # NOTES
 # This script builds a "typical year" synthetic climate + albedo record for
-# Lake Fryxell from a MEAN ANNUAL CLIMATOLOGY — i.e. for each (day-of-year,
-# hour) it averages that same timestep-of-year across every year in LF's
+# West Lake Bonney from a MEAN ANNUAL CLIMATOLOGY — i.e. for each (day-of-year,
+# hour) it averages that same timestep-of-year across every year in WLB's
 # full available met record (back into the 1990s, not just the short
 # 2016/2017-onward window the ice model itself runs over) — and then simply
 # repeats that climatological cycle forward as the forecast-period climate.
 #
-# This replaces the earlier VAR-bootstrap forecasting approach (the original
-# 0.5_LF script that pooled +/- 7 days for quantile mapping etc.): instead of
-# stochastically simulating year-to-year variability, we use the long-run
-# "typical year" directly. That trades away some realistic variability for a
-# much longer observational basis, simplicity, and transparency — a clean,
-# low-noise baseline to layer climate scenarios on top of.
+# This is the same approach used for ELB/LH/LF (replacing an earlier
+# VAR-bootstrap forecasting design): instead of stochastically simulating
+# year-to-year variability, we use the long-run "typical year" directly.
+# That trades away some realistic variability for a much longer observational
+# basis, simplicity, and transparency — a clean, low-noise baseline to layer
+# climate scenarios on top of.
 #
 # The goal is unchanged: produce a realistic meteorological + albedo baseline
 # that different climate scenarios (warming trends, offsets, etc. — see
 # build_climate_scenario() / prepare_model_input()) can be layered onto, so
-# we can see how LF ice thickness responds to those scenarios.
+# we can see how WLB ice thickness responds to those scenarios.
 #
 # This driver is a thin wrapper around the lake-agnostic
 # generate_climatological_climate() function in
 # R/TEST_Optimizations/functions.R. All the climatology-building / tiling
-# machinery lives there; only LF-specific choices are made here.
+# machinery lives there; only WLB-specific choices are made here.
 
 source("R/TEST_Optimizations/libraries.R")
 source("R/TEST_Optimizations/functions.R")
 
-lake_key <- "LF"
+lake_key <- "WLB"
 
 # Build (or rebuild) the model-ready inputs `inputs` that 01_ runs the ice
-# model on. Adjust `n_years` in 00_LF_data_preparation.R to change how many
+# model on. Adjust `n_years` in 00_WLB_data_preparation.R to change how many
 # years the ice MODEL runs for — that is independent of the long climatology
 # record built below.
-source("R/LF/00_LF_data_preparation.R")
+source("R/WLB/00_WLB_data_preparation.R")
 
 ###################### Build a LONG record for the climatology ######################
 # generate_climatological_climate() needs as much observed history as
 # possible (the more years it can pool per (day-of-year, hour) cell, the
 # more representative the "typical year" is). We re-run
 # prepare_lake_model_inputs() with an early start_filter and n_years = "max"
-# so it pulls and gap-fills LF's entire available station record — using
+# so it pulls and gap-fills WLB's entire available station record — using
 # exactly the same lake-specific loading/interpolation logic as `inputs`
 # above, just over a much longer span.
 #
