@@ -75,9 +75,10 @@ PATHS <- list(
 LAKE_CONFIGS <- list(
 
   ELB = list(
-    lake_name       = "East Lake Bonney",
-    L_initial       = 3.88,   # ice-to-ice thickness on 2016-12-17
-    Chi             = 0.40,
+    lake_name        = "East Lake Bonney",
+    L_initial        = 3.88,   # ice-to-ice thickness on 2016-12-17
+    Chi              = 0.40, #0.40,
+    albedo_multiplier = 1.00,  # 
     start_filter    = as.POSIXct("2016-12-21 00:00:00"),
     n_years         = 6.95,
     base_station    = "BOYM",
@@ -91,9 +92,10 @@ LAKE_CONFIGS <- list(
   ),
 
   WLB = list(
-    lake_name       = "West Lake Bonney",
-    L_initial       = 3.39,   # ice-to-ice thickness on 2016-12-17
-    Chi             = 0.30,
+    lake_name        = "West Lake Bonney",
+    L_initial        = 3.39,   # ice-to-ice thickness on 2016-12-17
+    Chi              = 0.35, #0.30,
+    albedo_multiplier = 1.00,  # no adjustment
     start_filter    = as.POSIXct("2016-12-23 00:00:00"),
     n_years         = 6.95,
     base_station    = "BOYM",
@@ -107,9 +109,10 @@ LAKE_CONFIGS <- list(
   ),
 
   LH = list(
-    lake_name       = "Lake Hoare",
-    L_initial       = 3.50,   # ice-to-ice thickness on 2016-12-17
-    Chi             = 0.40,
+    lake_name        = "Lake Hoare",
+    L_initial        = 3.50,   # ice-to-ice thickness on 2016-12-17
+    Chi              = 0.40,
+    albedo_multiplier = 1.00,  # no adjustment
     start_filter    = as.POSIXct("2016-12-14 00:00:00"),
     n_years         = 6.95,
     base_station    = "HOEM",
@@ -123,9 +126,10 @@ LAKE_CONFIGS <- list(
   ),
 
   LF = list(
-    lake_name       = "Lake Fryxell",
-    L_initial       = 4.60,   # ice-to-ice thickness on 2016-12-17
-    Chi             = 0.40,
+    lake_name        = "Lake Fryxell",
+    L_initial        = 4.60,   # ice-to-ice thickness on 2016-12-17
+    Chi              = 0.40,
+    albedo_multiplier = 1.00,  # leave LF as-is
     start_filter    = as.POSIXct("2016-12-11 00:00:00"),
     n_years         = 6.95,   # NOTE: legacy 00_LF_data_preparation.R used 20 — see message at end of refactor
     base_station    = "FRLM",
@@ -431,6 +435,17 @@ prepare_lake_model_inputs <- function(
   albedo_interp <- interp_to_model(albedo_15min$time,
                                    albedo_15min$albedo.predict.bb, "albedo")
 
+  # Apply this lake's albedo multiplier (LAKE_CONFIGS$<lake>$albedo_multiplier;
+  # defaults to 1 = no change if a config omits it). This lets you scale a
+  # lake's albedo forcing up or down — e.g. albedo_multiplier = 1.5 bumps ELB's
+  # albedo up 50% — without touching the raw AlbedoModel.csv data. Re-clamped
+  # to the physical [0, 1] range afterward, since albedo can't exceed 1.
+  albedo_mult <- cfg$albedo_multiplier %||% 1
+  if (albedo_mult != 1) {
+    message(sprintf("  applying albedo_multiplier = %.2f for %s", albedo_mult, cfg$lake_name))
+  }
+  albedo_interp <- pmin(pmax(albedo_interp * albedo_mult, 0), 1)
+
   # ---- 11. Ice thickness validation data (lake- and site-specific) --------
   message("Filtering ice thickness observations...")
 
@@ -664,645 +679,30 @@ build_climate_scenario <- function(
   result
 }
 
-
-# ============================================================
-# generate_synthetic_climate
-# — lake-agnostic replacement for the 0.5_<LAKE>_data_preparation_
-#   forecasting.R scripts
-# — fits a VAR model to the anomalies of a lake's prepared climate
-#   record (relative to its (day-of-year, hour) seasonal cycle),
-#   bootstraps a "realistic" synthetic climate record from the
-#   residual distribution, applies physical corrections (clear-sky
-#   shortwave masking, quantile-mapped air temperature, recomputed
-#   LWR_out, variance-matched LWR_in), and forecasts forward to a
-#   target horizon year.
-#
-#   The resulting `synthetic` (historical-period) and
-#   `future_physical` (forecast-period) records preserve the lake's
-#   realistic meteorology + albedo statistics, so different climate
-#   scenarios (warming trends, flat offsets, seasonal adjustments —
-#   see build_climate_scenario() / prepare_model_input()) can be
-#   layered on top and run through run_ice_model() to see how ice
-#   thickness responds.
-#
-#   lake_key     : "ELB" | "WLB" | "LH" | "LF" — resolves cfg$coords
-#                  (lat/lon) used for clear-sky sun-angle masking
-#   time_series  : a prepared lake climate time series, e.g.
-#                  inputs$time_series from prepare_lake_model_inputs()
-#                  (must contain time, T_air, SW_in, LWR_in, LWR_out,
-#                  albedo, pressure, wind, relative_humidity)
-#   horizon_year : final calendar year to forecast out to
-#   window_days  : +/- days used to pool observations by (doy, hour)
-#                  for seasonal quantile mapping (legacy scripts used
-#                  14 for ELB and 7 for LF — pick whichever matches
-#                  the lake's data density / seasonality)
-#   max_lag      : maximum VAR lag considered during lag selection
-#   sim_seed / forecast_seed : RNG seeds for the historical bootstrap
-#                  simulation and the future-horizon simulation
-#   plot_diagnostics : if TRUE, also build density / ACF / correlation
-#                  comparison plots (observed vs. synthetic)
-#
-#   returns list(
-#     lake_key, lake_name,
-#     synthetic        = <historical-period synthetic climate tibble>,
-#     future_physical  = <forecast-period synthetic climate tibble>,
-#     var_model        = <fitted VAR model, for inspection/reuse>,
-#     diagnostics      = list(p_choice, method_used, emissivity,
-#                             n_sim, n_future, plots)
-#   )
-#
-#   Required packages (load in the driver script before sourcing
-#   functions.R, the same way 00_*.R loads `suncalc` when needed):
-#   zoo, vars, copula, reshape2, gridExtra, scales, suncalc, purrr
-# ============================================================
-generate_synthetic_climate <- function(
-    lake_key,
-    time_series,
-    lake_configs     = LAKE_CONFIGS,
-    horizon_year     = 2037,
-    window_days      = 14,
-    max_lag          = 24,
-    sim_seed         = 123,
-    forecast_seed    = 999,
-    plot_diagnostics = TRUE
-) {
-
-  cfg <- lake_configs[[lake_key]]
-  if (is.null(cfg)) stop(sprintf(
-    "Unknown lake_key '%s'. Valid options: %s",
-    lake_key, paste(names(lake_configs), collapse = ", ")
-  ))
-
-  message(sprintf("Generating synthetic climate record for %s (%s)...", cfg$lake_name, lake_key))
-
-  lat_site <- cfg$coords$lat
-  lon_site <- cfg$coords$lon
-  sigma_sb <- 5.670374419e-8
-
-  # ---- 1. Prepare and sanity-check ----------------------------------------
-  df <- time_series |>
-    arrange(time) |>
-    mutate(time = as.POSIXct(time, tz = "UTC"))
-
-  na_count <- sum(is.na(df))
-  message("Total NA values in dataset: ", na_count)
-  if (na_count > 0) {
-    message("NA values present — consider filling/removing them before modelling.")
-  }
-
-  # ---- 2. Transform variables ----------------------------------------------
-  eps       <- 1e-6
-  logit     <- function(x) qlogis(pmin(pmax(x, eps), 1 - eps))
-  inv_logit <- function(x) plogis(x)
-
-  df_trans <- df |>
-    mutate(
-      relative_humidity_frac = relative_humidity / 100,
-      relative_humidity_frac = pmin(pmax(relative_humidity_frac, 0.0001), 0.9999),
-      rh_t           = qlogis(relative_humidity_frac),
-      albedo_clamped = pmin(pmax(albedo, 0.0001), 0.9999),
-      albedo_t       = qlogis(albedo_clamped),
-      wind_t         = sqrt(pmax(wind, 0)),
-      T_air_t        = T_air,
-      SW_in_t        = SW_in,
-      LWR_in_t       = LWR_in,
-      pressure_t     = pressure
-    ) |>
-    dplyr::select(time, T_air_t, SW_in_t, LWR_in_t, albedo_t, pressure_t, wind_t, rh_t)
-
-  # ---- 3. Seasonal cycle (doy x hour) and anomalies ------------------------
-  df_trans <- df_trans |> mutate(hour = hour(time), doy = yday(time))
-
-  vars_t <- c("T_air_t", "SW_in_t", "LWR_in_t", "albedo_t", "pressure_t", "wind_t", "rh_t")
-
-  seasonal_means <- df_trans |>
-    group_by(doy, hour) |>
-    summarise(
-      T_air_t_seas    = mean(T_air_t,    na.rm = TRUE),
-      SW_in_t_seas    = mean(SW_in_t,    na.rm = TRUE),
-      LWR_in_t_seas   = mean(LWR_in_t,   na.rm = TRUE),
-      albedo_t_seas   = mean(albedo_t,   na.rm = TRUE),
-      pressure_t_seas = mean(pressure_t, na.rm = TRUE),
-      wind_t_seas     = mean(wind_t,     na.rm = TRUE),
-      rh_t_seas       = mean(rh_t,       na.rm = TRUE),
-      .groups = "drop"
-    )
-
-  df_anom <- df_trans |>
-    left_join(seasonal_means, by = c("doy", "hour"), suffix = c("", "_seas")) |>
-    mutate(across(all_of(vars_t), ~ . - get(paste0(cur_column(), "_seas")), .names = "anom_{col}"))
-
-  anom_names <- paste0("anom_", vars_t)
-  Y <- df_anom |> dplyr::select(all_of(anom_names)) |> as.matrix()
-
-  na_rows <- apply(Y, 1, function(x) any(is.na(x)))
-  if (any(na_rows)) {
-    warning(sum(na_rows), " rows contain NA in anomalies. These will be removed for VAR fitting.")
-    Y_fit <- Y[!na_rows, ]
-  } else {
-    Y_fit <- Y
-  }
-
-  # ---- 4. Fit VAR (select lag) ----------------------------------------------
-  lag_sel <- VARselect(Y_fit, lag.max = max_lag, type = "const")
-  message("Lag selection results:")
-  print(lag_sel$selection)
-
-  p_choice <- as.integer(lag_sel$selection["AIC(n)"])
-  if (is.na(p_choice)) p_choice <- 1
-  message("Selected VAR lag p = ", p_choice)
-
-  var_model <- VAR(Y_fit, p = p_choice, type = "const")
-
-  resids    <- as.matrix(residuals(var_model))
-  Sigma_res <- cov(resids, use = "pairwise.complete.obs")
-
-  # ---- helper: recursive bootstrap simulation from residual draws ----------
-  simulate_VAR_bootstrap <- function(var_model, n_sim, init_y = NULL, resids = NULL, seed = NULL) {
-    if (!is.null(seed)) set.seed(seed)
-
-    p  <- var_model$p
-    Yv <- var_model$y
-    k  <- ncol(Yv)
-    varnames <- colnames(Yv)
-
-    coefs_list <- var_model$varresult
-    A_list <- vector("list", p)
-    for (l in 1:p) A_list[[l]] <- matrix(0, nrow = k, ncol = k)
-    const_vec <- numeric(k)
-
-    for (i in seq_len(k)) {
-      this_mod <- coefs_list[[i]]
-      co <- coef(this_mod)
-      names_co <- names(co)
-
-      if ("const" %in% names_co) {
-        const_vec[i] <- co["const"]
-      } else if ("(Intercept)" %in% names_co) {
-        const_vec[i] <- co["(Intercept)"]
-      } else {
-        const_vec[i] <- 0
-      }
-
-      for (l in 1:p) {
-        lag_names <- paste0("L", l, ".", varnames)
-        present   <- intersect(lag_names, names_co)
-        if (length(present) > 0) {
-          A_list[[l]][i, match(present, lag_names)] <- co[present]
-        }
-      }
-    }
-
-    if (is.null(init_y)) init_y <- tail(Yv, p)
-    state <- as.matrix(init_y)
-
-    if (is.null(resids)) stop("Must supply residual matrix")
-    resids <- as.matrix(resids)
-
-    Ysim <- matrix(NA_real_, nrow = n_sim, ncol = k)
-    colnames(Ysim) <- varnames
-
-    for (t in 1:n_sim) {
-      mean_t <- const_vec
-      for (l in 1:p) {
-        past_row <- state[nrow(state) - (l - 1), ]
-        mean_t   <- mean_t + A_list[[l]] %*% past_row
-      }
-      e_t   <- resids[sample(nrow(resids), 1), ]
-      new_y <- as.numeric(mean_t + e_t)
-      Ysim[t, ] <- new_y
-
-      if (p > 1) {
-        state <- rbind(state[-1, , drop = FALSE], new_y)
-      } else {
-        state <- matrix(new_y, nrow = 1)
-      }
-    }
-
-    as.data.frame(Ysim)
-  }
-
-  # ---- 5. Synthetic simulation (bootstrap residual VAR) --------------------
-  n_sim <- nrow(resids)
-
-  sim_anom_mat <- simulate_VAR_bootstrap(
-    var_model = var_model, n_sim = n_sim, init_y = NULL, resids = resids, seed = sim_seed
-  )
-  sim_anom <- as.data.frame(sim_anom_mat)
-  colnames(sim_anom) <- colnames(var_model$y)
-
-  # ---- 6. Reconstruct physical variables ------------------------------------
-  if (!all(colnames(var_model$y) %in% anom_names)) {
-    warning("VAR column names differ from expected anomaly names. Attempting to align by position.")
-  }
-
-  sim_full <- df_anom |>
-    dplyr::select(time, doy, hour) |>
-    mutate(row_id = row_number(), sim_index = row_number()) |>
-    bind_cols(as_tibble(sim_anom)[1:nrow(df_anom), , drop = FALSE]) |>
-    left_join(seasonal_means, by = c("doy", "hour"))
-
-  recon <- sim_full
-  for (v in vars_t) {
-    anom_col <- paste0("anom_", v)
-    seas_col <- paste0(v, "_seas")
-    out_col  <- paste0(v, "_sim_recon")
-    recon[[out_col]] <- recon[[anom_col]] + recon[[seas_col]]
-  }
-
-  synthetic <- tibble(
-    time              = recon$time,
-    T_air             = recon$T_air_t_sim_recon,
-    SW_in             = recon$SW_in_t_sim_recon,
-    LWR_in            = recon$LWR_in_t_sim_recon,
-    albedo            = pmin(pmax(inv_logit(recon$albedo_t_sim_recon), 0), 1),
-    pressure          = recon$pressure_t_sim_recon,
-    wind              = (recon$wind_t_sim_recon)^2,
-    relative_humidity = pmin(pmax(inv_logit(recon$rh_t_sim_recon), 0), 1)
-  ) |>
-    mutate(delta_T = T_air - lag(T_air))
-
-  # ---- 7. Physical correction patch -----------------------------------------
-  message("Applying physical corrections (clear-sky SW mask, T_air quantile mapping)...")
-
-  sunpos <- suncalc::getSunlightPosition(date = synthetic$time, lat = lat_site, lon = lon_site)
-  synthetic$solar_alt <- sunpos$altitude
-
-  obs_sunpos  <- suncalc::getSunlightPosition(date = df$time, lat = lat_site, lon = lon_site)
-  df$solar_alt <- obs_sunpos$altitude
-
-  ub <- quantile(df$SW_in[df$solar_alt > 0], probs = 0.999, na.rm = TRUE)
-
-  synthetic <- synthetic |>
-    mutate(
-      SW_in_orig = SW_in,
-      SW_in = ifelse(solar_alt <= 0, 0, SW_in),
-      SW_in = ifelse(SW_in < 0, 0, SW_in),
-      SW_in = pmin(SW_in, ub)
-    )
-
-  df <- df |> mutate(doy = yday(time), hour = hour(time))
-  obs_groups <- df |>
-    group_by(doy, hour) |>
-    summarise(vals = list(na.omit(T_air)), n = length(na.omit(T_air)), .groups = "drop")
-
-  circ_dist <- function(a, b, nyear = 365) {
-    d <- abs(a - b)
-    pmin(d, nyear - d)
-  }
-
-  get_obs_pool <- function(target_doy, target_hour, window = window_days) {
-    pool <- obs_groups |>
-      filter(hour == target_hour) |>
-      mutate(dd = circ_dist(doy, target_doy)) |>
-      filter(dd <= window) |>
-      pull(vals)
-    if (length(pool) == 0) return(numeric(0))
-    unlist(pool)
-  }
-
-  qm_map_one <- function(x, obs_pool) {
-    if (is.na(x) || length(obs_pool) < 10) return(x)
-    p <- ecdf(obs_pool)(x)
-    as.numeric(quantile(obs_pool, probs = p, na.rm = TRUE, type = 8))
-  }
-
-  synthetic <- synthetic |>
-    mutate(doy = yday(time), hour = hour(time),
-           obs_pool_id = paste0(doy, "_", hour))
-
-  unique_keys   <- unique(synthetic$obs_pool_id)
-  obs_pool_list <- setNames(vector("list", length(unique_keys)), unique_keys)
-  for (key in unique_keys) {
-    parts <- strsplit(key, "_")[[1]]
-    obs_pool_list[[key]] <- get_obs_pool(as.integer(parts[1]), as.integer(parts[2]))
-  }
-
-  mapped_T <- vector("numeric", nrow(synthetic))
-  for (i in seq_len(nrow(synthetic))) {
-    mapped_T[i] <- qm_map_one(synthetic$T_air[i], obs_pool_list[[synthetic$obs_pool_id[i]]])
-  }
-
-  replace_idx <- !is.na(mapped_T)
-  synthetic$T_air_qm <- synthetic$T_air
-  synthetic$T_air[replace_idx] <- mapped_T[replace_idx]
-
-  emissivity <- mean(df$LWR_out / (sigma_sb * df$T_air^4), na.rm = TRUE)
-  emissivity <- pmin(pmax(emissivity, 0.4), 1.0)
-  synthetic  <- synthetic |> mutate(LWR_out = emissivity * sigma_sb * (T_air)^4)
-
-  obs_sd_by_key <- df |>
-    group_by(doy, hour) |>
-    summarise(sd_obs = sd(LWR_in, na.rm = TRUE), .groups = "drop") |>
-    mutate(key = paste0(doy, "_", hour))
-
-  synthetic <- synthetic |>
-    left_join(obs_sd_by_key |> dplyr::select(key, sd_obs), by = c("obs_pool_id" = "key")) |>
-    mutate(
-      LWR_in_resid = LWR_in - mean(LWR_in, na.rm = TRUE),
-      LWR_in = ifelse(!is.na(sd_obs) & sd(LWR_in, na.rm = TRUE) < sd_obs,
-                      mean(LWR_in, na.rm = TRUE) + LWR_in_resid * (sd_obs / (sd(LWR_in, na.rm = TRUE) + 1e-9)),
-                      LWR_in)
-    ) |>
-    dplyr::select(-LWR_in_resid, -sd_obs)
-
-  synthetic_fixed <- synthetic |>
-    mutate(
-      SW_in             = pmax(SW_in, 0),
-      albedo            = pmin(pmax(albedo, 0), 1),
-      relative_humidity = pmin(pmax(relative_humidity, 0), 1),
-      wind              = pmax(wind, 0),
-      pressure          = pmax(pressure, 1)
-    ) |>
-    dplyr::select(-solar_alt, -obs_pool_id, -doy, -hour)
-
-  pre_counts <- synthetic |> summarise(
-    neg_SW   = sum(SW_in_orig < 0, na.rm = TRUE),
-    n240_260 = sum(T_air_qm >= 240 & T_air_qm <= 260, na.rm = TRUE)
-  )
-  post_counts <- synthetic_fixed |> summarise(
-    neg_SW   = sum(SW_in < 0, na.rm = TRUE),
-    n240_260 = sum(T_air >= 240 & T_air <= 260, na.rm = TRUE)
-  )
-  message("Diagnostics before/after physical corrections:")
-  print(bind_rows(before = pre_counts, after = post_counts))
-
-  # ---- 8. Align sim_anom -> df_anom -> apply QM -> rebuild T_air ------------
-  common_cols <- intersect(colnames(sim_anom), colnames(df_anom))
-  if (length(common_cols) == 0) {
-    common_cols <- intersect(grep("^anom_", colnames(sim_anom), value = TRUE),
-                             grep("^anom_", colnames(df_anom), value = TRUE))
-  }
-  if (length(common_cols) == 0) stop("Could not find shared anomaly column names between sim_anom and df_anom.")
-
-  mask_complete <- complete.cases(df_anom[, common_cols, drop = FALSE])
-  n_mask <- sum(mask_complete)
-  n_sim2 <- nrow(sim_anom)
-
-  if (n_mask == n_sim2) {
-    use_idx     <- which(mask_complete)
-    method_used <- "exact_complete_match"
-  } else if (n_mask > n_sim2) {
-    use_idx     <- which(mask_complete)[1:n_sim2]
-    method_used <- "first_N_of_complete_rows"
-  } else {
-    miss_count  <- apply(is.na(df_anom[, common_cols, drop = FALSE]), 1, sum)
-    ranked      <- order(miss_count, decreasing = FALSE)
-    use_idx     <- sort(ranked[1:n_sim2])
-    method_used <- "least-missing_fallback"
-  }
-  message("Anomaly alignment method used: ", method_used)
-
-  sim_anom_full <- df_anom |> dplyr::select(time)
-  for (v in colnames(sim_anom)) sim_anom_full[[v]] <- NA_real_
-
-  nfill <- min(length(use_idx), nrow(sim_anom))
-  for (v in colnames(sim_anom)) {
-    sim_anom_full[[v]][use_idx[1:nfill]] <- sim_anom[[v]][1:nfill]
-  }
-
-  if (!"doy"  %in% names(synthetic_fixed)) synthetic_fixed <- synthetic_fixed |> mutate(doy  = yday(time))
-  if (!"hour" %in% names(synthetic_fixed)) synthetic_fixed <- synthetic_fixed |> mutate(hour = hour(time))
-
-  seas_candidates <- c("T_air_t_seas", "T_air_seasonal", "T_air_seas", "T_air_t_season_mean")
-  seas_col <- intersect(seas_candidates, names(df_anom))
-  if (length(seas_col) == 0) stop("No seasonal temperature column found in df_anom.")
-  df_anom2 <- df_anom |> rename(T_air_t_seas = !!sym(seas_col[1]))
-
-  synthetic_fixed <- synthetic_fixed |>
-    left_join(sim_anom_full |> dplyr::select(time, all_of(colnames(sim_anom))), by = "time") |>
-    left_join(df_anom2 |> dplyr::select(time, T_air_t_seas), by = "time")
-
-  if (!("anom_T_air_t" %in% names(synthetic_fixed))) {
-    t_anom_cand <- intersect(c("anom_T_air_t", "anom_T_air", "T_air_anom", "anom_air_temp"),
-                             names(synthetic_fixed))
-    if (length(t_anom_cand) == 0) stop("Cannot find T_air anomaly in synthetic after join.")
-    synthetic_fixed <- synthetic_fixed |> rename(anom_T_air_t = !!sym(t_anom_cand[1]))
-  }
-  if (!("T_air_t_seas" %in% names(synthetic_fixed))) stop("T_air_t_seas missing in synthetic after join.")
-
-  synthetic_fixed <- synthetic_fixed |> mutate(T_air_raw = anom_T_air_t + T_air_t_seas)
-
-  obsA <- df_anom2 |> dplyr::select(time, doy, hour, anom_T_air_t)
-
-  get_pool <- function(target_doy, target_hour) {
-    obsA |>
-      filter(hour == target_hour) |>
-      mutate(dd = circ_dist(doy, target_doy)) |>
-      filter(dd <= window_days) |>
-      pull(anom_T_air_t)
-  }
-
-  qm_one <- function(x, pool) {
-    if (is.na(x) || length(pool) < 30) return(x)
-    p <- ecdf(pool)(x)
-    quantile(pool, probs = p, type = 8, na.rm = TRUE)
-  }
-
-  synthetic_fixed <- synthetic_fixed |> mutate(doy = yday(time))
-
-  synthetic_fixed$anom_T_air_qm <- purrr::pmap_dbl(
-    list(synthetic_fixed$anom_T_air_t, synthetic_fixed$doy, synthetic_fixed$hour),
-    function(x, doy, hour) qm_one(x, get_pool(doy, hour))
-  )
-
-  synthetic_fixed <- synthetic_fixed |> mutate(T_air = anom_T_air_qm + T_air_t_seas)
-
-  orig_emissivity <- mean(df$LWR_out / (sigma_sb * df$T_air^4), na.rm = TRUE)
-  orig_emissivity <- min(max(orig_emissivity, 0.4), 1.0)
-  synthetic_fixed <- synthetic_fixed |> mutate(LWR_out = orig_emissivity * sigma_sb * (T_air^4))
-
-  message("Finished alignment/QM. sim_anom rows: ", n_sim2,
-          " ; df_anom rows: ", nrow(df_anom),
-          " ; synthetic rows: ", nrow(synthetic_fixed))
-
-  # ---- 9. Final physical constraints ----------------------------------------
-  synthetic_final <- synthetic_fixed |>
-    mutate(
-      albedo            = pmin(pmax(albedo, 0), 1),
-      relative_humidity = pmin(pmax(relative_humidity, 0), 1),
-      wind              = pmax(wind, 0),
-      pressure          = pmax(pressure, 1)
-    )
-
-  # ---- 10. Optional diagnostic plots (observed vs. synthetic) ---------------
-  diagnostic_plots <- NULL
-  if (isTRUE(plot_diagnostics)) {
-    message("Building diagnostic plots...")
-    plot_vars <- c("T_air", "SW_in", "LWR_in", "LWR_out", "albedo", "wind", "relative_humidity")
-
-    combined_df <- bind_rows(
-      df              |> dplyr::select(time, all_of(plot_vars)) |>
-        pivot_longer(-time, names_to = "variable", values_to = "value") |> mutate(source = "observed"),
-      synthetic_final |> dplyr::select(time, all_of(plot_vars)) |>
-        pivot_longer(-time, names_to = "variable", values_to = "value") |> mutate(source = "synthetic")
-    )
-
-    density_plots <- lapply(unique(combined_df$variable), function(var_name) {
-      ggplot(filter(combined_df, variable == var_name), aes(x = value, fill = source, colour = source)) +
-        geom_density(alpha = 0.2, linewidth = 0.5) +
-        ggtitle(var_name) +
-        theme_minimal()
-    })
-    names(density_plots) <- unique(combined_df$variable)
-
-    acf_orig  <- acf(na.omit(df$T_air),              plot = FALSE)
-    acf_synth <- acf(na.omit(synthetic_final$T_air), plot = FALSE)
-    acf_plot  <- tibble(lag = acf_orig$lag, observed = acf_orig$acf, synthetic = acf_synth$acf) |>
-      pivot_longer(-lag, names_to = "series", values_to = "acf") |>
-      ggplot(aes(x = lag, y = acf, colour = series)) +
-      geom_line() +
-      ggtitle(sprintf("ACF: T_air observed vs. synthetic — %s", cfg$lake_name)) +
-      theme_bw()
-
-    orig_mat  <- df             |> dplyr::select(all_of(plot_vars)) |> drop_na() |> as.matrix()
-    synth_mat <- synthetic_final |> dplyr::select(all_of(plot_vars)) |> drop_na() |> as.matrix()
-
-    m1 <- reshape2::melt(cor(orig_mat,  use = "pairwise.complete.obs"))
-    m2 <- reshape2::melt(cor(synth_mat, use = "pairwise.complete.obs"))
-    names(m1) <- names(m2) <- c("Var1", "Var2", "Corr")
-    m1$source <- "observed"; m2$source <- "synthetic"
-
-    corr_plot <- ggplot(bind_rows(m1, m2), aes(x = Var1, y = Var2, fill = Corr)) +
-      geom_tile() + facet_wrap(~source) +
-      scale_fill_gradient2(low = "blue", mid = "white", high = "red", limits = c(-1, 1)) +
-      theme_minimal() + theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
-      ggtitle(sprintf("Correlation matrices: observed vs. synthetic — %s", cfg$lake_name))
-
-    diagnostic_plots <- list(density = density_plots, acf = acf_plot, correlation = corr_plot)
-  }
-
-  # ---- 11. Forecast into the future (preserve mean climate) -----------------
-  message(sprintf("Forecasting %s climate out to %d...", cfg$lake_name, horizon_year))
-
-  last_obs_time <- max(df$time)
-  dt_seconds <- as.numeric(median(diff(sort(df$time)), na.rm = TRUE), units = "secs")
-  if (is.na(dt_seconds) || dt_seconds <= 0) dt_seconds <- 3600
-
-  future_end   <- as.POSIXct(paste0(horizon_year, "-12-31 23:59:59"), tz = tz(last_obs_time))
-  future_times <- seq(from = last_obs_time + dt_seconds, to = future_end, by = dt_seconds)
-  n_future <- length(future_times)
-  message("Simulating ", n_future, " future timesteps from ", as.character(min(future_times)),
-          " to ", as.character(max(future_times)))
-
-  p      <- var_model$p
-  Y_full <- var_model$y
-  if (nrow(Y_full) < p) stop("VAR fit contains fewer rows than p. Cannot initialize simulation.")
-  init_y <- Y_full[(nrow(Y_full) - p + 1):nrow(Y_full), , drop = FALSE]
-
-  future_anom <- as_tibble(simulate_VAR_bootstrap(
-    var_model = var_model, n_sim = n_future, init_y = init_y, resids = resids, seed = forecast_seed
-  ))
-
-  future_df <- future_anom |>
-    mutate(time = future_times, doy = yday(time), hour = hour(time)) |>
-    left_join(seasonal_means, by = c("doy", "hour"))
-
-  if (any(is.na(future_df[[paste0(vars_t[1], "_seas")]]))) {
-    warning("Some seasonal means are missing for future times (check seasonal_means keys).")
-  }
-
-  for (v in vars_t) {
-    anom_col <- paste0("anom_", v)
-    seas_col <- paste0(v, "_seas")
-    out_col  <- paste0(v, "_sim_t")
-    if (!all(c(anom_col, seas_col) %in% names(future_df))) {
-      stop("Missing columns when reconstructing: ", anom_col, " or ", seas_col)
-    }
-    future_df[[out_col]] <- future_df[[anom_col]] + future_df[[seas_col]]
-  }
-
-  future_physical <- future_df |>
-    transmute(
-      time              = time,
-      T_air             = !!sym("T_air_t_sim_t"),
-      SW_in             = !!sym("SW_in_t_sim_t"),
-      LWR_in            = !!sym("LWR_in_t_sim_t"),
-      pressure          = !!sym("pressure_t_sim_t"),
-      relative_humidity = plogis(!!sym("rh_t_sim_t")) * 100,
-      albedo            = plogis(!!sym("albedo_t_sim_t")),
-      wind              = pmax(!!sym("wind_t_sim_t"), 0)^2
-    )
-
-  message("Done. synthetic: ", nrow(synthetic_final), " rows | future_physical: ",
-          nrow(future_physical), " rows (", min(future_physical$time), " -> ",
-          max(future_physical$time), ")")
-
-  list(
-    lake_key        = lake_key,
-    lake_name       = cfg$lake_name,
-    synthetic       = synthetic_final,
-    future_physical = future_physical,
-    var_model       = var_model,
-    diagnostics     = list(
-      p_choice    = p_choice,
-      method_used = method_used,
-      emissivity  = orig_emissivity,
-      n_sim       = n_sim2,
-      n_future    = n_future,
-      plots       = diagnostic_plots
-    )
-  )
-}
-
-
-# ============================================================
-# generate_climatological_climate
-# — lake-agnostic, mean-annual-cycle alternative to
-#   generate_synthetic_climate()
-# — instead of fitting a VAR model to a short, recent record, this
-#   pools the lake's ENTIRE available met record (e.g. back into the
-#   1990s — see start_filter = "max" usage below), computes a mean
-#   annual cycle (the average value of each variable at each
-#   (day-of-year, hour) across all observed years), and simply
-#   repeats that climatological cycle forward as the "synthetic"
-#   future climate. No stochastic simulation, no VAR fitting — just
-#   "what does a typical year at this lake look like, on average,
-#   across as much history as we have, repeated forward in time."
-#
-#   This trades the VAR approach's realistic year-to-year variability
-#   for simplicity, transparency, and a much longer observational
-#   basis — a useful complement when you want a clean, low-noise
-#   "typical year" baseline to layer climate scenarios on top of.
-#
-#   lake_key     : "ELB" | "WLB" | "LH" | "LF" — used for messages/labels
-#   time_series  : a LONG, lake-agnostic prepared climate time series —
-#                  ideally spanning back across as much of the met
-#                  record as is available (NOT the short, lake-specific
-#                  modeling-period record). Build one with, e.g.:
-#                    long_inputs <- prepare_lake_model_inputs(
-#                      lake_key, station_data, airt_primary, airt_secondary,
-#                      ice_thickness, albedo_orig,
-#                      start_filter = as.POSIXct("1990-01-01"),
-#                      n_years      = "max"
-#                    )
-#                  and pass long_inputs$time_series here.
-#   horizon_year : final calendar year to tile the climatology out to
-#   plot_diagnostics : if TRUE, build density comparison plots of the
-#                  observed long record vs. the climatological
-#                  reconstruction over that same span
-#
-#   returns list(
-#     lake_key, lake_name,
-#     climatology      = <tibble of (doy, hour) mean-annual values, plus
-#                         n_years_pooled = how many distinct observed
-#                         years contributed to each (doy, hour) cell>,
-#     synthetic        = <historical-period record, reconstructed by
-#                         looking up each timestamp's (doy, hour)
-#                         climatological mean — directly comparable to
-#                         generate_synthetic_climate()'s $synthetic>,
-#     future_physical  = <forecast-period record: the climatology tiled
-#                         forward from the end of the long record out
-#                         to horizon_year, at the same timestep>,
-#     diagnostics      = list(n_years_pooled, record_span, plots)
-#   )
 # ============================================================
 generate_climatological_climate <- function(
     lake_key,
     time_series,
     lake_configs     = LAKE_CONFIGS,
     horizon_year     = 2037,
-    plot_diagnostics = TRUE
+    plot_diagnostics = TRUE,
+    albedo_method    = "block_bootstrap",  # "block_bootstrap" (default) splices
+                                            # whole randomly-chosen DONOR YEARS of
+                                            # real observed albedo into both the
+                                            # historical reconstruction and the
+                                            # tiled-forward forecast -- preserving
+                                            # real day-to-day persistence and the
+                                            # natural Oct/Nov -> Jan transition
+                                            # shape/timing, while still varying
+                                            # year to year. Set to "climatology_mean"
+                                            # to fall back to the old behavior (a
+                                            # single per-(doy,hour) mean curve,
+                                            # identical every year -- compresses
+                                            # away all of albedo's natural variance).
+    albedo_block_seed = 50                 # optional seed for reproducible donor-
+                                            # year draws (set.seed()'d internally
+                                            # if supplied; left NULL = honor
+                                            # whatever RNG state the caller has)
 ) {
 
   cfg <- lake_configs[[lake_key]]
@@ -1352,23 +752,11 @@ generate_climatological_climate <- function(
     ) |>
     arrange(doy, hour)
 
-  # ---- 3. Reconstruct the historical period from the climatology ------------
-  # (directly comparable to generate_synthetic_climate()'s $synthetic — same
-  # span as the observed record, but every value is that timestamp's
-  # (doy, hour) mean-annual value rather than a stochastic draw)
-  synthetic <- df |>
-    dplyr::select(time, doy, hour) |>
-    left_join(climatology |> dplyr::select(doy, hour, all_of(phys_vars)), by = c("doy", "hour")) |>
-    mutate(
-      albedo            = pmin(pmax(albedo, 0), 1),
-      relative_humidity = pmin(pmax(relative_humidity, 0), 100),
-      wind              = pmax(wind, 0),
-      pressure          = pmax(pressure, 1),
-      delta_T           = T_air - lag(T_air)
-    ) |>
-    dplyr::select(-doy, -hour)
-
-  # ---- 4. Tile the climatology forward to the forecast horizon --------------
+  # ---- 3. Pre-compute the forecast-horizon time vector ----------------------
+  # (moved up from where it originally lived below `synthetic` -- the albedo
+  # block-bootstrap below needs `future_times` so it can assign donor years to
+  # BOTH the historical reconstruction and the tiled-forward forecast in one
+  # consistent pass)
   last_obs_time <- max(df$time)
   dt_seconds <- as.numeric(median(diff(sort(df$time)), na.rm = TRUE), units = "secs")
   if (is.na(dt_seconds) || dt_seconds <= 0) dt_seconds <- 3600
@@ -1378,9 +766,132 @@ generate_climatological_climate <- function(
   message(sprintf("  ...tiling climatology forward across %d timesteps (%s -> %s)",
                   length(future_times), format(min(future_times)), format(max(future_times))))
 
+  # ---- 3b. Albedo: block-bootstrap whole observed YEARS instead of  ---------
+  # ----     collapsing every year into one (doy, hour) mean curve     -------
+  # A flat per-cell mean throws away exactly the things that make albedo
+  # "dynamic" in the way you described (range ~0.3-0.7, low in Oct/Nov, peaking
+  # around Jan): (1) day-to-day PERSISTENCE -- a snow-covered surface stays
+  # that way for days/weeks, it doesn't reset toward "the average" every
+  # timestep -- and (2) inter-annual variability in exactly WHEN the sharp
+  # spring transition happens -- averaging blends different years' transition
+  # dates into one smeared ramp that no real year ever showed.
+  #
+  # Block-bootstrapping fixes both at once: each calendar year that needs
+  # albedo (whether in the historical reconstruction or the tiled-forward
+  # forecast) gets ONE randomly-chosen, complete, real observed year's actual
+  # (doy, hour) -> albedo trajectory spliced in whole. That keeps each donor
+  # year's true persistence and transition shape intact, while still varying
+  # from year to year because different target years draw different donors --
+  # "natural" variability built from real trajectories rather than injected
+  # noise.
+  if (!is.null(albedo_block_seed)) set.seed(albedo_block_seed)
+
+  albedo_obs <- df |>
+    dplyr::select(time, doy, hour, yr, albedo) |>
+    drop_na(albedo)
+
+  # Only "reasonably complete" years are eligible donors -- a partial
+  # first/last year of record would leave gaps if spliced whole into a target
+  # year, so years with far fewer observations than the modal year are excluded.
+  yr_counts   <- albedo_obs |> dplyr::count(yr)
+  donor_years <- yr_counts |> filter(n >= 0.9 * max(n)) |> pull(yr) |> sort()
+
+  use_block_bootstrap <- identical(albedo_method, "block_bootstrap") && length(donor_years) >= 2
+  if (identical(albedo_method, "block_bootstrap") && length(donor_years) < 2) {
+    warning(sprintf(
+      paste0("[%s] only %d complete year(s) of albedo data available -- block-bootstrap ",
+             "needs >= 2 donor years to introduce inter-annual variability; falling back ",
+             "to the per-(doy,hour) climatological mean for albedo."),
+      cfg$lake_name, length(donor_years)
+    ))
+  }
+
+  if (use_block_bootstrap) {
+
+    albedo_donor_pool <- albedo_obs |> filter(yr %in% donor_years)
+
+    message(sprintf("  block-bootstrapping albedo for %s from %d whole-year donor(s): %s",
+                    cfg$lake_name, length(donor_years), paste(donor_years, collapse = ", ")))
+
+    assign_donors <- function(target_years) {
+      setNames(sample(donor_years, length(target_years), replace = TRUE), target_years)
+    }
+
+    bootstrap_albedo_for <- function(times, donor_map) {
+      tibble(time = times) |>
+        mutate(target_yr = year(time), doy = yday(time), hour = hour(time),
+               donor_yr  = unname(donor_map[as.character(target_yr)])) |>
+        left_join(albedo_donor_pool |>
+                    dplyr::select(donor_yr = yr, doy, hour, albedo_boot = albedo),
+                  by = c("donor_yr", "doy", "hour")) |>
+        dplyr::select(time, albedo_boot)
+    }
+
+    albedo_boot_synth  <- bootstrap_albedo_for(df$time,      assign_donors(sort(unique(year(df$time)))))
+    albedo_boot_future <- bootstrap_albedo_for(future_times, assign_donors(sort(unique(year(future_times)))))
+
+    # A handful of (donor_yr, doy, hour) combinations may not exist in the
+    # donor pool (e.g. leap-day mismatches, or a donor missing a few hours) --
+    # patch any such gaps with that cell's climatological mean so nothing
+    # leaks through as NA.
+    albedo_clim_lookup <- climatology |> dplyr::select(doy, hour, albedo_clim = albedo)
+
+    fill_gaps_from_climatology <- function(boot_df, times) {
+      tibble(time = times) |>
+        mutate(doy = yday(time), hour = hour(time)) |>
+        left_join(boot_df,           by = "time") |>
+        left_join(albedo_clim_lookup, by = c("doy", "hour")) |>
+        mutate(albedo_boot = coalesce(albedo_boot, albedo_clim)) |>
+        dplyr::select(time, albedo_boot)
+    }
+
+    albedo_boot_synth  <- fill_gaps_from_climatology(albedo_boot_synth,  df$time)
+    albedo_boot_future <- fill_gaps_from_climatology(albedo_boot_future, future_times)
+
+  } else {
+    # Fallback / explicit opt-out (albedo_method = "climatology_mean"): behave
+    # exactly like the original approach -- one value per (doy, hour) cell,
+    # identical every single year.
+    albedo_boot_synth <- df |>
+      dplyr::select(time, doy, hour) |>
+      left_join(climatology |> dplyr::select(doy, hour, albedo), by = c("doy", "hour")) |>
+      dplyr::select(time, albedo_boot = albedo)
+
+    albedo_boot_future <- tibble(time = future_times) |>
+      mutate(doy = yday(time), hour = hour(time)) |>
+      left_join(climatology |> dplyr::select(doy, hour, albedo), by = c("doy", "hour")) |>
+      dplyr::select(time, albedo_boot = albedo)
+  }
+
+  # ---- 4. Reconstruct the historical period from the climatology ------------
+  # (directly comparable to generate_synthetic_climate()'s $synthetic — same
+  # span as the observed record; every variable EXCEPT albedo is that
+  # timestamp's (doy, hour) mean-annual value, while albedo comes from the
+  # block-bootstrap above -- see step 3b for why albedo is handled separately)
+  synthetic <- df |>
+    dplyr::select(time, doy, hour) |>
+    left_join(climatology |> dplyr::select(doy, hour, all_of(phys_vars)), by = c("doy", "hour")) |>
+    dplyr::select(-albedo) |>
+    left_join(albedo_boot_synth, by = "time") |>
+    dplyr::rename(albedo = albedo_boot) |>
+    mutate(
+      albedo            = pmin(pmax(albedo, 0), 1),
+      relative_humidity = pmin(pmax(relative_humidity, 0), 100),
+      wind              = pmax(wind, 0),
+      pressure          = pmax(pressure, 1),
+      delta_T           = T_air - lag(T_air)
+    ) |>
+    dplyr::select(-doy, -hour)
+
+  # ---- 5. Tile the climatology forward to the forecast horizon --------------
+  # (same split: every variable except albedo comes from the tiled (doy, hour)
+  # mean curve; albedo comes from the block-bootstrap's future donor draws)
   future_physical <- tibble(time = future_times) |>
     mutate(doy = yday(time), hour = hour(time)) |>
     left_join(climatology |> dplyr::select(doy, hour, all_of(phys_vars)), by = c("doy", "hour")) |>
+    dplyr::select(-albedo) |>
+    left_join(albedo_boot_future, by = "time") |>
+    dplyr::rename(albedo = albedo_boot) |>
     mutate(
       albedo            = pmin(pmax(albedo, 0), 1),
       relative_humidity = pmin(pmax(relative_humidity, 0), 100),
@@ -1398,7 +909,7 @@ generate_climatological_climate <- function(
       fill(all_of(phys_vars), .direction = "downup")
   }
 
-  # ---- 5. Optional diagnostic plots (observed vs. climatological recon) -----
+  # ---- 6. Optional diagnostic plots (observed vs. climatological recon) -----
   diagnostic_plots <- NULL
   if (isTRUE(plot_diagnostics)) {
     message("Building diagnostic plots (observed vs. climatological reconstruction)...")

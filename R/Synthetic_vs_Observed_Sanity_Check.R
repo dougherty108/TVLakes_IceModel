@@ -48,7 +48,7 @@
 #
 # This driver is a thin diagnostic layer over the lake-agnostic functions in
 # R/TEST_Optimizations/functions.R — no lake-specific modeling code lives here.
-
+ 
 source("R/TEST_Optimizations/libraries.R")
 source("R/TEST_Optimizations/functions.R")
 
@@ -57,13 +57,13 @@ source("R/TEST_Optimizations/functions.R")
 # used by the 0.5_<LAKE> scripts and Compare_All_Lakes_Synthetic_Forecast.R,
 # so the climatology being tested here is the SAME climatology that produces
 # the forecast-period drift we're trying to explain.
-climatology_start <- as.POSIXct("1990-01-01")
+climatology_start <- as.POSIXct("2000-01-01")
 
 # generate_climatological_climate() requires a horizon_year to tile the
 # future forcing forward, but `future_physical` is unused in this script —
 # we only need `synthetic` (the historical-period reconstruction). Any valid
 # year works here.
-horizon_year <- 2037
+horizon_year <- 2050
 
 # Per-lake diagnostic density/seasonal-cycle plots from
 # generate_climatological_climate() are skipped here (they're already

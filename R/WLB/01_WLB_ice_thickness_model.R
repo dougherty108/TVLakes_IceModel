@@ -14,7 +14,7 @@
 # lake_constants(), and plot_ice_model(). All WLB-specific choices live in
 # LAKE_CONFIGS$WLB and were already applied when `inputs` was built in
 # 00_WLB_data_preparation.R.
-
+ 
 source("R/TEST_Optimizations/libraries.R")
 source("R/TEST_Optimizations/functions.R")
 
@@ -27,7 +27,7 @@ source("R/WLB/00_WLB_data_preparation.R")
 ###################### Apply warming trend (observed pathway) ######################
 # Set warming_rate = 0 for no trend, or > 0 to apply a compounding annual
 # warming trend to T_air (and recompute LWR_out / delta_T as needed).
-warming_rate <- 0.003   # 0.3% per year
+warming_rate <- 0.000   # 0.3% per year
 
 ts_ready <- prepare_model_input(
   inputs$time_series,

@@ -54,7 +54,7 @@ plot_diagnostics <- FALSE
 # year" — but only as far back as each lake's met record actually goes
 # (prepare_lake_model_inputs(..., n_years = "max") will simply use whatever
 # is available after this filter is applied).
-climatology_start <- as.POSIXct("2000-01-01")
+climatology_start <- as.POSIXct("2015-01-01")
 
 # Per-lake settings: which 00_ script to source (builds the short
 # modeling-period `inputs` that 01_ would run the ice model on).
@@ -248,3 +248,4 @@ print(input_data_plot)
 # `climatology_start`) above and re-run — `lake_results`, `comparison_df`,
 # `summary_table`, `comparison_plot`, `input_data_df`, and `input_data_plot`
 # will all be rebuilt for the new scenario, with no per-lake code to edit.
+
