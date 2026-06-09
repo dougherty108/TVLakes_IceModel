@@ -111,7 +111,7 @@ LAKE_CONFIGS <- list(
   LH = list(
     lake_name        = "Lake Hoare",
     L_initial        = 3.50,   # ice-to-ice thickness on 2016-12-17
-    Chi              = 0.40,
+    Chi              = 0.42,
     albedo_multiplier = 1.00,  # no adjustment
     start_filter    = as.POSIXct("2016-12-14 00:00:00"),
     n_years         = 6.95,
@@ -965,37 +965,56 @@ generate_climatological_climate <- function(
 # ============================================================
 # prepare_model_input
 # — single gateway between any input source and run_ice_model
-# — warming trend applied HERE and nowhere else
+# — warming and albedo trends applied HERE and nowhere else
+#
+# warming_rate : linear trend added to T_air in Kelvin per year
+#                elapsed since the forecast start:
+#                  T_air = T_air + warming_rate * (year - baseline_year)
+#                0 = no trend; positive = warming; negative = cooling.
+#
+# albedo_rate  : same structure, applied to albedo instead of T_air:
+#                  albedo = albedo + albedo_rate * (year - baseline_year)
+#                clamped to [0, 1] afterward so the result stays physical.
+#                0 = no trend; positive = albedo increasing over time
+#                (more reflective surface -> less absorbed SW -> less melt);
+#                negative = albedo decreasing over time (more melt).
 # ============================================================
 prepare_model_input <- function(
     time_series,
-    warming_rate = 0,          # 0 = no trend; set > 0 for observed pathway
+    warming_rate = 0,   # K/yr added to T_air; 0 = no trend
+    albedo_rate  = 0,   # unitless/yr added to albedo; 0 = no trend
     constants    = CONSTANTS
 ) {
   sigma      <- constants$sigma
   emissivity <- constants$emissivity
-  
+
   # Compute delta_T (always needed by model)
   time_series <- time_series |>
     arrange(time) |>
     mutate(delta_T = T_air - lag(T_air))
-  
+
   # Recompute LWR_out from Stefan-Boltzmann only if not already present
   # (observed pathway already has measured LWR_out)
   if (!"LWR_out" %in% names(time_series)) {
     time_series <- time_series |>
-      mutate(LWR_out = (emissivity * sigma * T_air^4)*0.95)
+      mutate(LWR_out = (emissivity * sigma * T_air^4) * 0.95)
   }
-  
-  # Apply compounding warming — ONLY here, ONLY if warming_rate > 0
-  if (warming_rate > 0) {
-    baseline_year <- min(year(time_series$time))
+
+  baseline_year <- min(year(time_series$time))
+
+  # Apply linear warming trend — ONLY here, ONLY if warming_rate != 0
+  if (warming_rate != 0) {
     time_series <- time_series |>
-      mutate(
-        T_air = T_air + warming_rate * (year(time) - baseline_year)
-      )
+      mutate(T_air = T_air + warming_rate * (year(time) - baseline_year))
   }
-  
+
+  # Apply linear albedo trend — ONLY here, ONLY if albedo_rate != 0.
+  # Clamped to [0, 1] so the result always stays physically valid.
+  if (albedo_rate != 0) {
+    time_series <- time_series |>
+      mutate(albedo = pmin(pmax(albedo + albedo_rate * (year(time) - baseline_year), 0), 1))
+  }
+
   time_series |> drop_na(delta_T)
 }
 

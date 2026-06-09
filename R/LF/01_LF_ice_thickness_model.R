@@ -32,7 +32,7 @@ source("R/LF/00_LF_data_preparation.R")
 ###################### Apply warming trend (observed pathway) ######################
 # Set warming_rate = 0 for no trend, or > 0 to apply a compounding annual
 # warming trend to T_air (and recompute LWR_out / delta_T as needed).
-warming_rate <- 0.003   # 0.3% per year
+warming_rate <- 0.000   # adjustable
 
 ts_ready <- prepare_model_input(
   inputs$time_series,

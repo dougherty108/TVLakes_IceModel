@@ -36,13 +36,18 @@ source("R/TEST_Optimizations/functions.R")
 
 ###################### Scenario assumptions (applied to every lake) ######################
 # How far forward (calendar year) to tile each lake's climatology out to.
-horizon_year <- 2050
+horizon_year <- 2100
 
-# Compounding annual warming rate applied to T_air in the forecast period.
+# Linear warming trend applied to T_air in the forecast period (K/yr).
 # Set to 0 for "no extra warming beyond the typical-year climatology itself";
-# > 0 to layer a warming scenario on top of that climatological baseline
-# (the comparison this script is built around).
-warming_rate <- 0.00   # 1% per year
+# positive to layer a warming scenario on top of that climatological baseline.
+warming_rate <- 0.00
+
+# Linear albedo trend applied to albedo in the forecast period (unitless/yr).
+# Set to 0 for no trend; positive = albedo rising over time (more reflective
+# surface -> less absorbed SW -> less melt); negative = albedo falling.
+# Clamped to [0, 1] automatically inside prepare_model_input().
+albedo_rate  <- 0.00
 
 # Set to FALSE to skip the (slower) per-lake diagnostic plots from
 # generate_climatological_climate() — the cross-lake comparison plot at the
@@ -102,11 +107,12 @@ for (lk in names(lake_specs)) {
     plot_diagnostics = plot_diagnostics
   )
 
-  # 3. Apply the shared warming-rate scenario to the climatological forecast
-  #    period and run the ice model on it.
+  # 3. Apply the shared warming / albedo-trend scenario to the climatological
+  #    forecast period and run the ice model on it.
   ts_ready <- prepare_model_input(
     climate_forecast$future_physical,
     warming_rate = warming_rate,
+    albedo_rate  = albedo_rate,
     constants    = lake_constants(lake_key)
   )
 
