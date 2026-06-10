@@ -56,8 +56,8 @@ horizon_year <- 2100
 #
 # To run every combination of the two arrays, set both; to vary only one
 # dimension (e.g. just warming, no albedo trend), set albedo_rates <- c(0).
-warming_rates <- c(0.00, 0.05)
-albedo_rates  <- c(0.00, -0.05)   # set to e.g. c(0.00, -0.005) to layer albedo trends
+warming_rates <- c(0.00, 0.01)
+albedo_rates  <- c(0.00, -0.005)   # set to e.g. c(0.00, -0.005) to layer albedo trends
 
 # Set to FALSE to skip the (slower) per-lake diagnostic plots from
 # generate_climatological_climate() -- this script's own comparison plots are
@@ -153,7 +153,7 @@ for (lk in names(lake_climates)) {
     }
   }
 }
-###################### Assemble a shared comparison table ######################
+ ###################### Assemble a shared comparison table ######################
 # One row per model timestep per (lake, warming_rate) scenario. `years_elapsed`
 # lines every scenario up on a common "years since forecast start" axis so they
 # can be plotted/compared directly even though each lake's forecast-start date
@@ -195,21 +195,23 @@ message("\n==================== Warming-scenario summary (", horizon_year,
 message("warming_rate is in Kelvin/year added to T_air, compounding with elapsed forecast time")
 print(scenario_summary, n = Inf)
 
-###################### Comparison plot: every lake, every warming rate ######################
-# Facet by lake (so each lake's own dynamics are easy to read), colour by
-# warming rate (a perceptually-ordered sequential palette, since warming_rate
-# is itself an ordered quantity -- "more red = more warming").
+###################### Comparison plot: all lakes, all scenarios ######################
 lake_colours <- c(ELB = "#3B8BD4", WLB = "#3BD48B", LH = "#E8593C", LF = "#9B59B6")
 
+# `scenario` is a compact label built earlier: "T+0.05 / α+0.0000" etc.
+# Facet by lake so each lake's own dynamics are easy to read; colour by
+# scenario so every (warming_rate, albedo_rate) combination gets a distinct line.
 scenario_plot <- ggplot(scenario_df,
                         aes(x = years_elapsed, y = thickness,
-                            colour = factor(warming_rate),  group = scenario)) +
+                            colour = scenario, group = scenario)) +
   geom_line(linewidth = 0.6, alpha = 0.85) +
   facet_wrap(~lake_name, scales = "free_y") +
-  scale_colour_viridis_d(name = "Warming rate\n(K/yr)", option = "plasma", end = 0.85) +
+  scale_colour_viridis_d(name = "Scenario\n(T K/yr / α /yr)",
+                         option = "plasma", end = 0.9) +
   labs(
-    title    = sprintf("Forecast ice thickness under multiple warming scenarios — all four lakes (to %d)", horizon_year),
-    subtitle = "",
+    title    = sprintf("Forecast ice thickness — all lakes, all scenarios (to %d)", horizon_year),
+    subtitle = sprintf("Climatology from %s  |  scenario label: T = warming rate (K/yr), α = albedo trend (/yr)",
+                       format(climatology_start, "%Y")),
     x        = "Years since forecast start",
     y        = "Ice thickness (m)"
   ) +
@@ -218,30 +220,26 @@ scenario_plot <- ggplot(scenario_df,
 
 print(scenario_plot)
 
-###################### Companion plot: final-thickness sensitivity to warming rate ######################
-# A compact "how much does the END STATE move per unit of warming" view --
-# one line per lake, x = warming rate, y = final thickness. Useful for seeing
-# at a glance which lakes are most/least sensitive to the warming assumption.
+###################### Companion plot: final-thickness sensitivity ######################
+# One line per scenario, x = lake, y = final thickness.
+# Makes it easy to read across scenarios for a given lake, or across lakes for
+# a given scenario.
 sensitivity_plot <- scenario_summary |>
-  ggplot(aes(x = warming_rate, y = final_thickness_m, colour = lake)) +
-  geom_line(linewidth = 0.7) +
-  geom_point(size = 2) +
-  scale_colour_manual(values = lake_colours, labels = function(x) {
-    sapply(x, function(lk) lake_climates[[lk]]$lake_name)
-  }) +
+  ggplot(aes(x = lake_name, y = final_thickness_m,
+             colour = scenario, group = scenario)) +
+  geom_line(linewidth = 0.7, alpha = 0.85) +
+  geom_point(size = 2.5) +
+  scale_colour_viridis_d(name = "Scenario\n(T K/yr / α /yr)",
+                         option = "plasma", end = 0.9) +
   labs(
-    title = sprintf("Final ice thickness (at %d) vs. assumed warming rate", horizon_year),
-    x     = "Warming rate (K/yr added to T_air)",
-    y     = "Final ice thickness (m)",
-    colour = "Lake"
+    title  = sprintf("Final ice thickness at %d — all lakes, all scenarios", horizon_year),
+    x      = NULL,
+    y      = "Final ice thickness (m)"
   ) +
   theme_minimal(base_size = 13) +
   theme(legend.position = "bottom")
 
 print(sensitivity_plot)
 
-# To explore a different set of scenarios (or a different forecast horizon /
-# climatology window), just change `warming_rates` (or `horizon_year` /
-# `climatology_start`) above and re-run -- `lake_climates`, `scenario_results`,
-# `scenario_df`, `scenario_summary`, `scenario_plot`, and `sensitivity_plot`
-# will all be rebuilt, with no per-lake or per-scenario code to edit.
+# To explore a different set of scenarios, just change `warming_rates` and/or
+# `albedo_rates` (or `horizon_year` / `climatology_start`) above and re-run.
