@@ -33,7 +33,10 @@ profile_pivot = profile |>
 
 
 ggplot(profile_pivot, aes(TIMESTAMP, value)) + 
-  geom_path(aes(color = name))
+  geom_path(aes(color = name)) + 
+  scale_color_brewer(palette = "Spectral") +
+  ggtitle("Thermal Profile un-corrected by ice bath") + 
+  theme_bw(base_size = 15)
 
 ####### load the calibration data to correct TempString deployment #######
 
@@ -108,6 +111,7 @@ ggplot(temp_air_ice, aes(TIMESTAMP, value_corrected, color = name)) +
     color = "Depth (cm)"
   ) + 
   geom_line(aes(TIMESTAMP, Air_Temp_Avg), color = "RED") + 
+  ggtitle("Thermal profile -- red line is air temp") + 
   theme_bw()
 
 ## directly plot air temperature against ice thermal temp
@@ -116,7 +120,9 @@ temp_air_ice |>
   ggplot(aes(Air_Temp_Avg, value)) + 
   geom_point(shape = 21) + 
   geom_smooth(method = "lm") + 
-  facet_wrap(vars(name))
+  facet_wrap(vars(name)) + 
+  ggtitle("above ice air temp against ice temp by depth") + 
+  theme_bw(base_size = 15)
 
 # For portions of ice closer to the atmosphere, air temp is more strongly correlated 
 # with ice temperature. But what about the lower sections, nearer the water column?
