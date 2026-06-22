@@ -26,11 +26,27 @@ CONSTANTS <- list(
   Ch         = 1.3e-3,    # sensible heat transfer coefficient
   Ce         = 1.3e-3,    # latent heat transfer coefficient
   Chi        = 0.43,      # fraction of SW absorbed at surface
-  
+
   # Model grid
   dx         = 0.1,       # spatial step (m)
   dt         = 1/24,      # time step (days)
-  L_initial  = 3.88       # initial ice thickness (m)
+  L_initial  = 3.88,      # initial ice thickness (m)
+
+  # Seasonal ice — open-water physics
+  # (only used when seasonally_frozen = TRUE; ignored for perennial-ice lakes)
+  seasonally_frozen = FALSE,  # set TRUE for lakes that freeze and thaw each year
+  k_water           = 0.57,   # thermal conductivity of liquid water at 0 °C (W/m/K)
+  rho_water         = 999.8,  # density of water near 0 °C (kg/m³)
+  Cp_water          = 4218,   # specific heat of water near 0 °C (J/kg/K)
+  mixing_depth      = 0.5,    # surface mixed-layer depth for open-water temp tracking (m)
+                               # — controls how quickly the lake surface cools/warms;
+                               # tune this to match observed freeze-onset timing
+  L_nucleation      = 0.002,  # ice thickness at nucleation (m) — 2 mm of new ice
+  albedo_water      = 0.06,   # open-water albedo (replaces time_series$albedo when
+                               # the lake is ice-free; typical clear-water value)
+  albedo_ice        = 0.85    # default ice/snow albedo for lakes with no AlbedoModel
+                               # data (overridden per-lake via LAKE_CONFIGS$albedo_ice;
+                               # applied as the constant time_series$albedo for those lakes)
 )
 
 # ============================================================
@@ -131,6 +147,7 @@ LAKE_CONFIGS <- list(
     Chi              = 0.40,
     albedo_multiplier = 1.00,  # leave LF as-is
     start_filter    = as.POSIXct("2016-12-11 00:00:00"),
+
     n_years         = 6.95,   # NOTE: legacy 00_LF_data_preparation.R used 20 — see message at end of refactor
     base_station    = "FRLM",
     stations_needed = c("HOEM", "COHM", "TARM", "FRLM", "EXEM"),
@@ -140,6 +157,29 @@ LAKE_CONFIGS <- list(
     humidity  = list(primary = "FRLM", secondary = "EXEM"),
     coords         = list(lat = -77.13449, lon = 162.449716),
     ice_loc_filter = function(df) dplyr::filter(df, str_starts(location, "O"))
+  ),
+
+  GL4 = list(
+    lake_name         = "Green Lake 4",
+    L_initial         = 0.0,    # start ice-free; model will nucleate ice when conditions allow
+    Chi               = 0.40,
+    albedo_multiplier = 1.00,
+    albedo_ice        = 0.60,   # constant dummy albedo — no AlbedoModel.csv for GL4
+    seasonally_frozen = TRUE,
+    start_filter      = as.POSIXct("2014-01-01 00:00:00"),
+
+    n_years           = "max",
+    base_station      = "D1",   # NWT LTER D1 station (single station, no secondary)
+    stations_needed   = c("D1"),
+    # GL4 uses a dedicated prepare_gl4_model_inputs() — the fields below are
+    # provided for reference / documentation only and are not consumed by
+    # prepare_lake_model_inputs() when lake_key == "GL4".
+    air_temp          = list(primary_col = "airtemp_avg", secondary_col = NULL),
+    shortwave         = list(primary = "D1", secondary = NULL, use_artificial = FALSE),
+    wind              = list(primary = "D1", secondary = NULL),
+    humidity          = list(primary = "D1", secondary = NULL),
+    coords            = list(lat = 40.0544, lon = -105.6172),  # Niwot Ridge, GL4
+    ice_loc_filter    = NULL
   )
 )
 
@@ -157,7 +197,11 @@ lake_constants <- function(lake_key, lake_configs = LAKE_CONFIGS, constants = CO
     "Unknown lake_key '%s'. Valid options: %s",
     lake_key, paste(names(lake_configs), collapse = ", ")
   ))
-  modifyList(constants, list(L_initial = cfg$L_initial, Chi = cfg$Chi))
+  overrides <- list(L_initial = cfg$L_initial, Chi = cfg$Chi)
+  # propagate optional per-lake constants when present
+  if (!is.null(cfg$seasonally_frozen)) overrides$seasonally_frozen <- cfg$seasonally_frozen
+  if (!is.null(cfg$albedo_ice))        overrides$albedo_ice        <- cfg$albedo_ice
+  modifyList(constants, overrides)
 }
 
 
@@ -679,6 +723,142 @@ build_climate_scenario <- function(
   result
 }
 
+
+# ============================================================
+# prepare_gl4_model_inputs
+# — GL4-specific input preparation for the NWT LTER D1 station
+#   10-min met data. Returns the same schema as
+#   prepare_lake_model_inputs() so it can be passed directly to
+#   prepare_model_input() and run_ice_model().
+#
+# Key differences from the Antarctic lakes:
+#   • Single station, no secondary fallback
+#   • 10-min raw resolution → aggregated to hourly
+#   • RH from rh_hmp1_avg (not rh_avg which has many NAs)
+#   • Pressure in mbar  → converted to Pa (×100)
+#   • SW from solrad_avg (W/m²); values >1500 W/m² flagged as erroneous
+#   • No AlbedoModel.csv → constant albedo from LAKE_CONFIGS$GL4$albedo_ice
+#   • No longwave-in measurement → estimated from Stefan-Boltzmann:
+#       LWR_in ≈ emissivity_atm × sigma × T_air^4
+#       where emissivity_atm is approximated from Brutsaert (1975):
+#       emissivity_atm = 1.24 × (e_a / T_air)^(1/7)
+#       and e_a (Pa) = (RH/100) × 611 × exp(17.27 × (T_air_C) / (T_air_C + 237.3))
+#   • Ice thickness from gl4_ice_thickness.nc.data.csv; values in cm → m
+# ============================================================
+prepare_gl4_model_inputs <- function(
+    met_csv,           # path to d-1cr23x-cr1000.10minute.ml.data.csv
+    ice_csv,           # path to gl4_ice_thickness.nc.data.csv
+    lake_configs = LAKE_CONFIGS,
+    constants    = CONSTANTS,
+    start_filter = NULL,   # POSIXct; filters met data to on/after this date
+    n_years      = "max"   # numeric years after start_filter, or "max"
+) {
+
+  cfg   <- lake_configs[["GL4"]]
+  consts <- lake_constants("GL4", lake_configs, constants)
+
+  # ---- 1. Load and clean met data ----
+  message("  [GL4] loading met data from: ", met_csv)
+  met_raw <- suppressMessages(suppressWarnings(
+    readr::read_csv(met_csv, na = c("", "NA", "NaN"), show_col_types = FALSE)
+  ))
+
+  # Parse datetime — column is date.time_start
+  met_raw <- met_raw |>
+    dplyr::rename(time = date.time_start) |>
+    dplyr::mutate(
+      time = lubridate::parse_date_time(time,
+               orders = c("Ymd HMS", "Ymd HM", "mdY HM", "mdY HMS"),
+               tz = "UTC")
+    ) |>
+    dplyr::filter(!is.na(time))
+
+  # Apply start / n_years filters
+  if (!is.null(start_filter)) {
+    met_raw <- dplyr::filter(met_raw, time >= start_filter)
+  }
+  if (!identical(n_years, "max") && is.numeric(n_years)) {
+    t0 <- min(met_raw$time, na.rm = TRUE)
+    met_raw <- dplyr::filter(met_raw, time <= t0 + lubridate::dyears(n_years))
+  }
+
+  # Flag / remove erroneous SW values (instrument ceiling ~1500 W/m²)
+  met_raw <- met_raw |>
+    dplyr::mutate(
+      solrad_avg = dplyr::if_else(!is.na(solrad_avg) & solrad_avg > 1500,
+                                  NA_real_, solrad_avg),
+      solrad_avg = dplyr::if_else(!is.na(solrad_avg) & solrad_avg < 0,
+                                  0, solrad_avg)
+    )
+
+  # Convert pressure mbar → Pa
+  met_raw <- met_raw |>
+    dplyr::mutate(bp_avg = bp_avg * 100)
+
+  # ---- 2. Aggregate to hourly ----
+  met_hourly <- met_raw |>
+    dplyr::mutate(time = lubridate::floor_date(time, "hour")) |>
+    dplyr::group_by(time) |>
+    dplyr::summarise(
+      T_air_C           = mean(airtemp_avg,   na.rm = TRUE),
+      RH                = mean(rh_hmp1_avg,   na.rm = TRUE),
+      pressure          = mean(bp_avg,         na.rm = TRUE),
+      wind              = mean(ws_avg,         na.rm = TRUE),
+      SW_in             = mean(solrad_avg,     na.rm = TRUE),
+      .groups = "drop"
+    ) |>
+    dplyr::mutate(
+      T_air = T_air_C + 273.15,          # K
+      # Saturation vapour pressure (Pa) via Magnus formula
+      e_sat = 611.0 * exp(17.27 * T_air_C / (T_air_C + 237.3)),
+      e_a   = (RH / 100) * e_sat,        # actual vapour pressure (Pa)
+      # Brutsaert (1975) atmospheric emissivity
+      emissivity_atm = 1.24 * (e_a / T_air)^(1/7),
+      emissivity_atm = pmin(pmax(emissivity_atm, 0.6), 1.0),
+      LWR_in  = emissivity_atm * constants$sigma * T_air^4,
+      LWR_out = constants$emissivity * constants$sigma * constants$Tf^4,
+      # Constant albedo (no AlbedoModel for GL4)
+      albedo  = consts$albedo_ice,
+      # Fill remaining NAs by linear interpolation where gaps are small
+      SW_in    = zoo::na.approx(SW_in,    na.rm = FALSE, maxgap = 6),
+      wind     = zoo::na.approx(wind,     na.rm = FALSE, maxgap = 6),
+      pressure = zoo::na.approx(pressure, na.rm = FALSE, maxgap = 6),
+      RH       = zoo::na.approx(RH,       na.rm = FALSE, maxgap = 6)
+    ) |>
+    dplyr::select(time, T_air, SW_in, LWR_in, LWR_out,
+                  albedo, pressure, wind, relative_humidity = RH)
+
+  # ---- 3. Load ice-thickness validation data (cm → m) ----
+  message("  [GL4] loading ice thickness data from: ", ice_csv)
+  ice_raw <- suppressMessages(suppressWarnings(
+    readr::read_csv(ice_csv, na = c("", "NA", "NaN"), show_col_types = FALSE)
+  ))
+
+  ice_thickness <- ice_raw |>
+    dplyr::mutate(
+      date = lubridate::ymd(date),
+      time = as.POSIXct(date, tz = "UTC"),
+      thickness = thickness / 100   # cm → m
+    ) |>
+    dplyr::filter(!is.na(time), !is.na(thickness)) |>
+    dplyr::select(time, thickness)
+
+  # ---- 4. Return in the same list schema as prepare_lake_model_inputs() ----
+  message(sprintf("  [GL4] prepared %d hourly rows (%s – %s)",
+                  nrow(met_hourly),
+                  format(min(met_hourly$time, na.rm = TRUE), "%Y-%m-%d"),
+                  format(max(met_hourly$time, na.rm = TRUE), "%Y-%m-%d")))
+
+  list(
+    lake_key     = "GL4",
+    lake_name    = cfg$lake_name,
+    time_series  = met_hourly,
+    ice_thickness = ice_thickness,
+    constants    = consts
+  )
+}
+
+
 # ============================================================
 generate_climatological_climate <- function(
     lake_key,
@@ -1024,7 +1204,7 @@ run_ice_model <- function(
     constants     = CONSTANTS,
     show_progress = TRUE
 ) {
-  # Unpack constants
+  # ---- Unpack constants ----
   dx         <- constants$dx
   dt         <- constants$dt
   alpha      <- constants$alpha
@@ -1044,20 +1224,29 @@ run_ice_model <- function(
   xLs        <- constants$xLs
   Tf         <- constants$Tf
   L_initial  <- constants$L_initial
-  
+
+  # ---- Seasonal-ice constants (safe defaults so Antarctic lakes are unaffected) ----
+  seasonally_frozen <- constants$seasonally_frozen %||% FALSE
+  k_water      <- constants$k_water      %||% 0.57
+  rho_water    <- constants$rho_water    %||% 999.8
+  Cp_water     <- constants$Cp_water     %||% 4218
+  mixing_depth <- constants$mixing_depth %||% 0.5
+  L_nucleation <- constants$L_nucleation %||% 0.002
+  albedo_water <- constants$albedo_water %||% 0.06
+
   dt_sec <- dt * 86400
   r      <- alpha * dt_sec / dx^2
   n_iter <- nrow(time_series)
-  
-  # Validate required columns
+
+  # ---- Validate required columns ----
   required_cols <- c("time", "T_air", "SW_in", "LWR_in", "LWR_out",
                      "albedo", "pressure", "wind", "delta_T", "relative_humidity")
   missing <- setdiff(required_cols, names(time_series))
   if (length(missing) > 0)
     stop("time_series is missing columns: ", paste(missing, collapse = ", "),
          "\nDid you run prepare_model_input() first?")
-  
-  # Extract to plain vectors
+
+  # ---- Extract to plain vectors ----
   v_T_air  <- time_series$T_air
   v_SW_in  <- time_series$SW_in
   v_LWR_in <- time_series$LWR_in
@@ -1068,8 +1257,8 @@ run_ice_model <- function(
   v_dT     <- time_series$delta_T
   v_rh     <- time_series$relative_humidity
   v_time   <- time_series$time
-  
-  # Pre-allocate outputs
+
+  # ---- Pre-allocate outputs ----
   out_thickness    <- numeric(n_iter)
   out_LW_net       <- numeric(n_iter)
   out_SW           <- numeric(n_iter)
@@ -1082,23 +1271,32 @@ run_ice_model <- function(
   out_bottom_gain  <- numeric(n_iter)
   out_depth        <- vector("list", n_iter)
   out_temperature  <- vector("list", n_iter)
-  
-  # Initialise state
+  # seasonally-frozen extra outputs (NA for perennial lakes)
+  out_phase        <- rep(NA_character_, n_iter)
+  out_T_water      <- rep(NA_real_,      n_iter)
+
+  # ---- Initialise state ----
   prevL      <- L_initial
-  depth      <- seq(0, L_initial, by = dx)
-  prevT      <- seq(from = v_T_air[1], to = Tf, length.out = length(depth))
+  depth      <- if (L_initial > 0) seq(0, L_initial, by = dx) else NA_real_
+  prevT      <- if (L_initial > 0)
+                  seq(from = v_T_air[1], to = Tf, length.out = length(depth))
+                else numeric(0)
   dL_surface <- 0
   dL_bottom  <- 0
-  
+
+  # Seasonal state machine variables
+  phase   <- if (L_initial > 0) "ice" else "open_water"
+  T_water <- Tf   # mixed-layer temperature; only meaningful in open_water phase
+
   if (show_progress) {
     pb <- progress_bar$new(
       format = "[:bar] :percent :elapsed | ETA: :eta",
       total  = n_iter, clear = FALSE
     )
   }
-  
+
   for (t_idx in seq_len(n_iter)) {
-    
+
     T_air   <- v_T_air[t_idx]
     SW_in   <- v_SW_in[t_idx]
     LWR_in  <- v_LWR_in[t_idx]
@@ -1108,110 +1306,168 @@ run_ice_model <- function(
     wind    <- v_wind[t_idx]
     delta_T <- v_dT[t_idx]
     rh      <- v_rh[t_idx]
-    
-    n_nodes <- length(prevT)
-    newT    <- prevT
-    
-    # -- 4b. Heat diffusion -------------------------------------------------
-    if (n_nodes >= 3) {
-      interior <- 2:(n_nodes - 1)
-      newT[interior] <- prevT[interior] +
-        r * (prevT[interior + 1] - 2 * prevT[interior] + prevT[interior - 1])
-    }
-    
-    # catch any NAs introduced by diffusion (e.g. from NA forcing values)
-    if (any(is.na(newT))) newT <- prevT
-    
-    # -- 4c. Boundary conditions --------------------------------------------
-    if (n_nodes >= 2) {
-      newT[1]       <- T_air
-      newT[n_nodes] <- Tf
-    } else if (n_nodes == 1) {
-      newT[1] <- T_air
-    }
-    
-    # -- 4d. Radiative fluxes -----------------------------------------------
-    SW_abs <- (1 - Chi) * SW_in * (1 - albedo)
-    LW_net <- LWR_in - LWR_out
-    
-    # -- 4e. Sensible heat flux ---------------------------------------------
-    rho_air <- (press * Ma) * 0.1 / (R * T_air)
-    Qh      <- rho_air * Ca * Ch * delta_T * wind
-    
-    # -- 4f. Latent heat flux (phase-dependent) -----------------------------
-    if (length(newT) > 0 && newT[1] >= Tf) {
-      A <- 6.1121; B <- 17.502; C <- 240.97; xLatent <- xLv
-    } else {
-      A <- 6.1115; B <- 22.452; C <- 272.55; xLatent <- xLs
-    }
-    
-    T_ref       <- T_air - Tf
-    ea          <- ((rh / 100) * A * exp((B * T_ref) / (C + T_ref))) / 100
-    rho_air_lat <- press * Ma / (R * T_air) * (1 + (epsilon - 1) * (ea / press))
-    es0         <- if (length(newT) > 0 && newT[1] >= Tf) {
-      (A * exp(0)) / 100
-    } else {
-      (A * exp((B * T_ref) / (C + T_ref))) / 100
-    }
-    Ql <- rho_air_lat * xLatent * Ce * (0.622 / press) * (ea - es0) * wind
-    
-    # -- 4g. Conductive flux ------------------------------------------------
-    Qc <- if (length(prevT) >= 1) k * (prevT[1] - T_air) / dx else 0
-    
-    # -- 4h. Net surface flux and mass balance ------------------------------
-    surface_flux <- SW_abs + (LW_net - Qc) + Qh + Ql
-    
-    dL_surface <- 0
-    if (!is.na(surface_flux) && surface_flux > 0) {
-      dL_surface <- surface_flux * dt_sec / (rho * L_f)
-    }
-    
-    newL <- prevL - dL_surface
-    
-    dL_bottom <- 0
-    if (!is.na(newL) && newL > 0 && n_nodes >= 2) {
-      Q_bottom  <- -k * (newT[n_nodes - 1] - newT[n_nodes]) / dx
-      dL_bottom <- Q_bottom * dt_sec / (rho * L_f)
-      newL      <- newL + dL_bottom
-    }
-    
-    newL <- max(0, newL)
-    
-    # -- 4i. Regrid temperature profile to new thickness -------------------
-    if (newL > 0 && prevL > 0 && length(newT) >= 2 && !all(is.na(newT))) {
-      newdepth <- seq(0, newL, by = dx)
-      old_grid <- seq(0, prevL, length.out = length(depth))
-      
-      if (length(unique(old_grid)) >= 2 && length(newdepth) >= 2) {
-        # normal case: interpolate onto new grid
-        newT <- approx(
-          x    = old_grid,
-          y    = newT,
-          xout = seq(0, newL, length.out = length(newdepth)),
-          rule = 2
-        )$y
-      } else {
-        # ice too thin to interpolate — hold mean temperature
-        newT <- rep(mean(newT, na.rm = TRUE), length(newdepth))
+
+    # ============================================================
+    # ICE PHASE — existing physics (perennial lakes always here)
+    # ============================================================
+    if (!seasonally_frozen || phase == "ice") {
+
+      n_nodes <- length(prevT)
+      newT    <- prevT
+
+      # -- Heat diffusion --------------------------------------------------
+      if (n_nodes >= 3) {
+        interior <- 2:(n_nodes - 1)
+        newT[interior] <- prevT[interior] +
+          r * (prevT[interior + 1] - 2 * prevT[interior] + prevT[interior - 1])
       }
-      
-    } else if (newL <= 0) {
-      # no ice remaining
-      newdepth <- NA_real_
-      newT     <- numeric(0)
-      
+      if (any(is.na(newT))) newT <- prevT
+
+      # -- Boundary conditions ---------------------------------------------
+      if (n_nodes >= 2) {
+        newT[1]       <- T_air
+        newT[n_nodes] <- Tf
+      } else if (n_nodes == 1) {
+        newT[1] <- T_air
+      }
+
+      # -- Radiative fluxes ------------------------------------------------
+      SW_abs <- (1 - Chi) * SW_in * (1 - albedo)
+      LW_net <- LWR_in - LWR_out
+
+      # -- Sensible heat flux ----------------------------------------------
+      rho_air <- (press * Ma) * 0.1 / (R * T_air)
+      Qh      <- rho_air * Ca * Ch * delta_T * wind
+
+      # -- Latent heat flux ------------------------------------------------
+      if (length(newT) > 0 && newT[1] >= Tf) {
+        A <- 6.1121; B <- 17.502; C <- 240.97; xLatent <- xLv
+      } else {
+        A <- 6.1115; B <- 22.452; C <- 272.55; xLatent <- xLs
+      }
+      T_ref       <- T_air - Tf
+      ea          <- ((rh / 100) * A * exp((B * T_ref) / (C + T_ref))) / 100
+      rho_air_lat <- press * Ma / (R * T_air) * (1 + (epsilon - 1) * (ea / press))
+      es0         <- if (length(newT) > 0 && newT[1] >= Tf) {
+        (A * exp(0)) / 100
+      } else {
+        (A * exp((B * T_ref) / (C + T_ref))) / 100
+      }
+      Ql <- rho_air_lat * xLatent * Ce * (0.622 / press) * (ea - es0) * wind
+
+      # -- Conductive flux -------------------------------------------------
+      Qc <- if (length(prevT) >= 1) k * (prevT[1] - T_air) / dx else 0
+
+      # -- Net surface flux and mass balance --------------------------------
+      surface_flux <- SW_abs + (LW_net - Qc) + Qh + Ql
+
+      dL_surface <- 0
+      if (!is.na(surface_flux) && surface_flux > 0) {
+        dL_surface <- surface_flux * dt_sec / (rho * L_f)
+      }
+
+      newL <- prevL - dL_surface
+
+      dL_bottom <- 0
+      if (!is.na(newL) && newL > 0 && n_nodes >= 2) {
+        Q_bottom  <- -k * (newT[n_nodes - 1] - newT[n_nodes]) / dx
+        dL_bottom <- Q_bottom * dt_sec / (rho * L_f)
+        newL      <- newL + dL_bottom
+      }
+
+      newL <- max(0, newL)
+
+      # -- Regrid temperature profile --------------------------------------
+      if (newL > 0 && prevL > 0 && length(newT) >= 2 && !all(is.na(newT))) {
+        newdepth <- seq(0, newL, by = dx)
+        old_grid <- seq(0, prevL, length.out = length(depth))
+        if (length(unique(old_grid)) >= 2 && length(newdepth) >= 2) {
+          newT <- approx(
+            x    = old_grid,
+            y    = newT,
+            xout = seq(0, newL, length.out = length(newdepth)),
+            rule = 2
+          )$y
+        } else {
+          newT <- rep(mean(newT, na.rm = TRUE), length(newdepth))
+        }
+      } else if (newL <= 0) {
+        newdepth <- NA_real_
+        newT     <- numeric(0)
+      } else {
+        newdepth <- seq(0, newL, by = dx)
+        newT     <- seq(from = T_air, to = Tf, length.out = length(newdepth))
+      }
+
+      # -- Seasonal: switch to open_water when ice disappears ---------------
+      if (seasonally_frozen && newL <= 0) {
+        phase   <- "open_water"
+        T_water <- Tf   # reset mixed layer to freezing point
+      }
+
     } else {
-      # newT was all NA or length < 2 — reset to linear gradient as fallback
-      newdepth <- seq(0, newL, by = dx)
-      newT     <- seq(from = T_air, to = Tf, length.out = length(newdepth))
+      # ============================================================
+      # OPEN WATER PHASE — mixed-layer energy balance + nucleation
+      # ============================================================
+
+      # Use open-water albedo
+      albedo_eff <- albedo_water
+
+      # Radiative fluxes (LWR_out from water surface temperature)
+      SW_abs <- (1 - Chi) * SW_in * (1 - albedo_eff)
+      LWR_out_water <- emissivity * sigma * T_water^4
+      LW_net <- LWR_in - LWR_out_water
+
+      # Sensible heat (bulk aerodynamic; delta_T here = T_water - T_air)
+      rho_air     <- (press * Ma) * 0.1 / (R * T_air)
+      dT_bulk     <- T_water - T_air
+      Qh          <- rho_air * Ca * Ch * dT_bulk * wind
+
+      # Latent heat from open water surface
+      A <- 6.1121; B <- 17.502; C <- 240.97; xLatent <- xLv
+      T_ref       <- T_air - Tf
+      ea          <- ((rh / 100) * A * exp((B * T_ref) / (C + T_ref))) / 100
+      rho_air_lat <- press * Ma / (R * T_air) * (1 + (epsilon - 1) * (ea / press))
+      T_ref_w     <- T_water - Tf
+      es0         <- (A * exp((B * T_ref_w) / (C + T_ref_w))) / 100
+      Ql          <- rho_air_lat * xLatent * Ce * (0.622 / press) * (ea - es0) * wind
+
+      # No conductive flux in open-water phase
+      Qc           <- 0
+      surface_flux <- SW_abs + LW_net + Qh + Ql
+
+      # Update mixed-layer temperature
+      dT_water <- if (!is.na(surface_flux)) {
+        surface_flux * dt_sec / (rho_water * Cp_water * mixing_depth)
+      } else 0
+      T_water <- T_water + dT_water
+
+      # Nucleation: if mixed layer reaches/passes Tf while losing heat → form ice
+      dL_surface <- 0
+      dL_bottom  <- 0
+      if (!is.na(T_water) && T_water <= Tf && !is.na(surface_flux) && surface_flux < 0) {
+        T_water  <- Tf
+        phase    <- "ice"
+        newL     <- L_nucleation
+        newdepth <- seq(0, newL, by = dx)
+        newT     <- seq(from = T_air, to = Tf, length.out = length(newdepth))
+      } else {
+        # Clamp water temp: can't meaningfully rise above some physical limit,
+        # but we only enforce the lower bound here (no ice can exist > Tf)
+        T_water  <- if (is.na(T_water)) Tf else max(Tf, T_water)
+        newL     <- 0
+        newdepth <- NA_real_
+        newT     <- numeric(0)
+      }
+      LWR_out <- LWR_out_water   # update for storage consistency
     }
-    
-    # -- 4j. Advance state --------------------------------------------------
+
+    # -- Advance state --------------------------------------------------------
     prevT <- newT
     prevL <- newL
     depth <- newdepth
-    
-    # -- 4k. Store outputs --------------------------------------------------
+
+    # -- Store outputs --------------------------------------------------------
     out_thickness[t_idx]    <- prevL
     out_LW_net[t_idx]       <- LW_net
     out_SW[t_idx]           <- SW_in
@@ -1224,11 +1480,15 @@ run_ice_model <- function(
     out_bottom_gain[t_idx]  <- dL_bottom
     out_depth[[t_idx]]      <- depth
     out_temperature[[t_idx]]<- prevT
-    
+    if (seasonally_frozen) {
+      out_phase[t_idx]   <- phase
+      out_T_water[t_idx] <- T_water
+    }
+
     if (show_progress) pb$tick()
   }
-  
-  tibble(
+
+  result <- tibble(
     time              = v_time,
     thickness         = out_thickness,
     LW_net            = out_LW_net,
@@ -1243,6 +1503,16 @@ run_ice_model <- function(
     depth             = out_depth,
     temperature       = out_temperature
   )
+
+  if (seasonally_frozen) {
+    result <- result |>
+      dplyr::mutate(
+        phase   = out_phase,
+        T_water = out_T_water
+      )
+  }
+
+  result
 }
 
 plot_scenario <- function(
