@@ -181,6 +181,29 @@ LAKE_CONFIGS <- list(
     humidity          = list(primary = "D1", secondary = NULL),
     coords            = list(lat = 40.0544, lon = -105.6172),  # Niwot Ridge, GL4
     ice_loc_filter    = NULL
+  ),
+
+  LOC = list(
+    lake_name         = "The Loch",
+    L_initial         = 0.10,   # = dx; start ice-covered (1 Jan is mid-winter) on a valid 2-node grid
+    L_nucleation      = 0.10,   # = dx; new ice forms at one grid step so the profile can grow
+    Chi               = 0.40,   # same as GL4 until Loch-specific tuning is available
+    albedo_multiplier = 1.00,
+    albedo_ice        = 0.85,   # constant dummy albedo (same as GL4) — no albedo data for the Loch
+    seasonally_frozen = TRUE,
+    start_filter      = as.POSIXct("2017-01-01 07:00:00", tz = "UTC"),  # first LVWS record (00:00 MST)
+
+    n_years           = "max",
+    base_station      = "LVWS", # Loch Vale weather station (USGS / NREL), single station
+    stations_needed   = c("LVWS"),
+    # The Loch uses a dedicated prepare_loc_model_inputs() — the fields below
+    # are provided for reference / documentation only.
+    air_temp          = list(primary_col = "airt", secondary_col = NULL),
+    shortwave         = list(primary = "LVWS", secondary = NULL, use_artificial = FALSE),
+    wind              = list(primary = "LVWS", secondary = NULL),
+    humidity          = list(primary = "LVWS", secondary = NULL),
+    coords            = list(lat = 40.2914, lon = -105.6636),  # The Loch, Loch Vale, RMNP
+    ice_loc_filter    = NULL
   )
 )
 
@@ -727,6 +750,42 @@ build_climate_scenario <- function(
 
 
 # ============================================================
+# standardize_gl4_ice
+# — converts the NWT LTER GL4 ice-thickness table (thickness in cm) to the
+#   MCM-LTER schema (location_name, location, date_time, z_water_m in m).
+#   Accepts the date column as `date` or `date_time`, in either the original
+#   ISO format (1984-10-06) or the Excel re-save format (10/6/84), and as
+#   text or already-parsed Date/POSIXct.
+# ============================================================
+standardize_gl4_ice <- function(df, lake_name = "Green Lake 4") {
+  date_col <- intersect(c("date_time", "date"), names(df))[1]
+  if (is.na(date_col)) stop(
+    "GL4 ice-thickness table needs a `date` or `date_time` column. Columns present: ",
+    paste(names(df), collapse = ", "))
+  if (!"thickness" %in% names(df)) stop(
+    "GL4 ice-thickness table needs a `thickness` column (cm). Columns present: ",
+    paste(names(df), collapse = ", "))
+
+  raw_dates <- df[[date_col]]
+  date_time <- if (inherits(raw_dates, c("POSIXct", "Date"))) {
+    as.POSIXct(raw_dates, tz = "UTC")
+  } else {
+    lubridate::parse_date_time(as.character(raw_dates),
+                               orders = c("Ymd", "mdy", "mdY", "Ymd HMS", "Ymd HM",
+                                          "mdy HM", "mdY HM"),
+                               tz = "UTC", quiet = TRUE)
+  }
+
+  tibble::tibble(
+    location_name = lake_name,
+    location      = if ("local_site" %in% names(df)) df$local_site else "GL4",
+    date_time     = date_time,
+    z_water_m     = as.numeric(df$thickness) / 100     # cm → m
+  )
+}
+
+
+# ============================================================
 # prepare_gl4_model_inputs
 # — GL4-specific input preparation for the NWT LTER D1 station
 #   10-min met data. Returns the same schema as
@@ -736,7 +795,7 @@ build_climate_scenario <- function(
 # Key differences from the Antarctic lakes:
 #   • Single station, no secondary fallback
 #   • 10-min raw resolution → aggregated to hourly
-#   • RH from rh_hmp1_avg (not rh_avg which has many NAs)
+#   • Air temp / RH coalesced across D1 sensors (logger changed in 2019)
 #   • Pressure in mbar  → converted to Pa (×100)
 #   • SW from solrad_avg (W/m²); values >1500 W/m² flagged as erroneous
 #   • No AlbedoModel.csv → constant albedo from LAKE_CONFIGS$GL4$albedo_ice
@@ -745,25 +804,40 @@ build_climate_scenario <- function(
 #       where emissivity_atm is approximated from Brutsaert (1975):
 #       emissivity_atm = 1.24 × (e_a / T_air)^(1/7)
 #       and e_a (Pa) = (RH/100) × 611 × exp(17.27 × (T_air_C) / (T_air_C + 237.3))
-#   • Ice thickness from gl4_ice_thickness.nc.data.csv; values in cm → m
+#   • Ice thickness from gl4_ice_thickness.nc.data.csv (cm, date column) is
+#     reformatted to the MCM-LTER schema used by the Antarctic lakes:
+#     location_name, location, date_time (POSIXct), z_water_m (positive m),
+#     so plot_ice_model() and downstream scripts work unchanged.
+#
+#   met_data / ice_thickness accept either a raw tibble (as the Antarctic
+#   00_ scripts pass) or a file path.
 # ============================================================
 prepare_gl4_model_inputs <- function(
-    met_csv,           # path to d-1cr23x-cr1000.10minute.ml.data.csv
-    ice_csv,           # path to gl4_ice_thickness.nc.data.csv
+    met_data,          # raw D1 10-min tibble, or path to d-1cr23x-cr1000.10minute.ml.data.csv
+    ice_thickness,     # raw GL4 ice tibble, or path to gl4_ice_thickness.nc.data.csv
     lake_configs = LAKE_CONFIGS,
     constants    = CONSTANTS,
-    start_filter = NULL,   # POSIXct; filters met data to on/after this date
-    n_years      = "max"   # numeric years after start_filter, or "max"
+    start_filter = NULL,   # POSIXct; NULL = LAKE_CONFIGS$GL4$start_filter
+    n_years      = NULL    # numeric years after start_filter; NULL = LAKE_CONFIGS$GL4$n_years
 ) {
 
   cfg   <- lake_configs[["GL4"]]
   consts <- lake_constants("GL4", lake_configs, constants)
+  start_filter <- start_filter %||% cfg$start_filter
+  if (!is.null(start_filter))
+    start_filter <- lubridate::force_tz(as.POSIXct(start_filter), "UTC")
+  n_years <- n_years %||% cfg$n_years %||% "max"
+
+  read_if_path <- function(x) {
+    if (is.character(x)) {
+      suppressMessages(suppressWarnings(
+        readr::read_csv(x, na = c("", "NA", "NaN"), show_col_types = FALSE)
+      ))
+    } else x
+  }
 
   # ---- 1. Load and clean met data ----
-  message("  [GL4] loading met data from: ", met_csv)
-  met_raw <- suppressMessages(suppressWarnings(
-    readr::read_csv(met_csv, na = c("", "NA", "NaN"), show_col_types = FALSE)
-  ))
+  met_raw <- read_if_path(met_data)
 
   # Parse datetime — column is date.time_start
   met_raw <- met_raw |>
@@ -861,20 +935,17 @@ prepare_gl4_model_inputs <- function(
     dplyr::select(time, T_air, SW_in, LWR_in, LWR_out,
                   albedo, pressure, wind, relative_humidity = RH)
 
-  # ---- 3. Load ice-thickness validation data (cm → m) ----
-  message("  [GL4] loading ice thickness data from: ", ice_csv)
-  ice_raw <- suppressMessages(suppressWarnings(
-    readr::read_csv(ice_csv, na = c("", "NA", "NaN"), show_col_types = FALSE)
-  ))
+  # ---- 3. Ice-thickness validation data → MCM-LTER schema ----
+  # Same columns/units as prepare_lake_model_inputs() returns for the
+  # Antarctic lakes: date_time (POSIXct), z_water_m (positive thickness, m).
+  ice_start <- min(met_hourly$time, na.rm = TRUE)
+  ice_end   <- max(met_hourly$time, na.rm = TRUE)
 
-  ice_thickness <- ice_raw |>
-    dplyr::mutate(
-      date = lubridate::ymd(date),
-      time = as.POSIXct(date, tz = "UTC"),
-      thickness = thickness / 100   # cm → m
-    ) |>
-    dplyr::filter(!is.na(time), !is.na(thickness)) |>
-    dplyr::select(time, thickness)
+  ice_thickness_clean <- read_if_path(ice_thickness) |>
+    standardize_gl4_ice(lake_name = cfg$lake_name) |>
+    dplyr::filter(!is.na(date_time), !is.na(z_water_m),
+                  date_time >= ice_start, date_time <= ice_end) |>
+    dplyr::select(location_name, location, date_time, z_water_m)
 
   # ---- 4. Return in the same list schema as prepare_lake_model_inputs() ----
   message(sprintf("  [GL4] prepared %d hourly rows (%s – %s)",
@@ -882,13 +953,180 @@ prepare_gl4_model_inputs <- function(
                   format(min(met_hourly$time, na.rm = TRUE), "%Y-%m-%d"),
                   format(max(met_hourly$time, na.rm = TRUE), "%Y-%m-%d")))
 
+  n_years_run <- as.numeric(difftime(ice_end, ice_start, units = "days")) / 365.25
+
   list(
-    lake_key     = "GL4",
-    lake_name    = cfg$lake_name,
-    time_series  = met_hourly,
-    ice_thickness = ice_thickness,
-    constants    = consts
+    lake_key      = "GL4",
+    lake_name     = cfg$lake_name,
+    time_series   = met_hourly,
+    ice_thickness = ice_thickness_clean,
+    time_model    = met_hourly$time,
+    params        = list(alpha = consts$alpha,
+                         r     = consts$alpha * consts$dt * 86400 / consts$dx^2,
+                         dt = consts$dt, dx = consts$dx,
+                         L_initial = consts$L_initial, Chi = consts$Chi,
+                         nt = nrow(met_hourly), n_years = n_years_run),
+    constants     = consts
   )
+}
+
+
+# ============================================================
+# prepare_loc_model_inputs
+# — Loch-specific (The Loch, Loch Vale, Rocky Mountain NP) input
+#   preparation. Mirrors prepare_gl4_model_inputs() and returns the same
+#   schema, so 01_LOC_ice_model.R runs the identical workflow.
+#
+# Met data: lvws_met_*.csv — Loch Vale weather station, already hourly (UTC):
+#   datetime  ISO-8601 UTC          airt      air temperature (°C)
+#   wnd_10    10 m wind speed (m/s) RH        relative humidity (%)
+#   swrad     incoming SW (W/m²)    lwrad_net NET longwave over the station
+#   press     pressure (Pa)                   site (W/m²) — not over the lake
+#
+#   • LWR_in is estimated with Brutsaert (1975) exactly as for GL4, because
+#     lwrad_net is a net value over land/snow at the station, not incoming LW.
+#     lwrad_net is kept in the time series as `LW_net_station` for reference.
+#   • No albedo data → constant albedo from LAKE_CONFIGS$LOC$albedo_ice.
+#   • Ice thickness: none yet. ice_thickness = NULL returns an empty table in
+#     the standard schema (location_name, location, date_time, z_water_m), so
+#     plotting and downstream code work unchanged. When data arrive, pass a
+#     table/path with either z_water_m (m) or date + thickness (cm, like GL4).
+# ============================================================
+prepare_loc_model_inputs <- function(
+    met_data,              # raw LVWS hourly tibble, or path to lvws_met_*.csv
+    ice_thickness = NULL,  # NULL (no data yet), tibble, or path
+    lake_configs  = LAKE_CONFIGS,
+    constants     = CONSTANTS,
+    start_filter  = NULL,  # POSIXct; NULL = LAKE_CONFIGS$LOC$start_filter
+    n_years       = NULL   # numeric years after start_filter; NULL = LAKE_CONFIGS$LOC$n_years
+) {
+
+  cfg    <- lake_configs[["LOC"]]
+  consts <- lake_constants("LOC", lake_configs, constants)
+  start_filter <- start_filter %||% cfg$start_filter
+  if (!is.null(start_filter))
+    start_filter <- lubridate::force_tz(as.POSIXct(start_filter), "UTC")
+  n_years <- n_years %||% cfg$n_years %||% "max"
+
+  read_if_path <- function(x) {
+    if (is.character(x)) {
+      suppressMessages(suppressWarnings(
+        readr::read_csv(x, na = c("", "NA", "NaN"), show_col_types = FALSE)
+      ))
+    } else x
+  }
+
+  # ---- 1. Load and clean met data ----
+  met_raw <- read_if_path(met_data) |>
+    dplyr::mutate(time = lubridate::floor_date(
+      lubridate::with_tz(lubridate::as_datetime(datetime), "UTC"), "hour")) |>
+    dplyr::filter(!is.na(time))
+
+  if (!is.null(start_filter)) met_raw <- dplyr::filter(met_raw, time >= start_filter)
+  if (!identical(n_years, "max") && is.numeric(n_years)) {
+    t0 <- min(met_raw$time, na.rm = TRUE)
+    met_raw <- dplyr::filter(met_raw, time <= t0 + lubridate::dyears(n_years))
+  }
+
+  in_range <- function(x, lo, hi) dplyr::if_else(!is.na(x) & x >= lo & x <= hi, x, NA_real_)
+
+  # ---- 2. Hourly series on a complete time spine ----
+  met_hourly <- met_raw |>
+    dplyr::group_by(time) |>
+    dplyr::summarise(
+      T_air_C        = mean(in_range(airt,   -50, 35),   na.rm = TRUE),
+      RH             = mean(in_range(RH,       0, 100),  na.rm = TRUE),
+      pressure       = mean(in_range(press, 5e4, 1.1e5), na.rm = TRUE),
+      wind           = mean(in_range(wnd_10,   0, 75),   na.rm = TRUE),
+      SW_in          = mean(in_range(swrad,    0, 1500), na.rm = TRUE),
+      LW_net_station = mean(lwrad_net,                  na.rm = TRUE),
+      .groups = "drop"
+    ) |>
+    tidyr::complete(time = seq(min(time), max(time), by = "hour")) |>
+    dplyr::mutate(dplyr::across(c(T_air_C, RH, pressure, wind, SW_in, LW_net_station),
+                                ~ dplyr::if_else(is.nan(.x), NA_real_, .x))) |>
+    # short gaps (≤ 6 h): linear interpolation
+    dplyr::mutate(dplyr::across(c(T_air_C, RH, pressure, wind, SW_in),
+                                ~ zoo::na.approx(.x, na.rm = FALSE, maxgap = 6))) |>
+    # longer gaps: month × hour-of-day climatology so the model never sees NA forcing
+    dplyr::group_by(.mo = lubridate::month(time), .hr = lubridate::hour(time)) |>
+    dplyr::mutate(dplyr::across(c(T_air_C, RH, pressure, wind, SW_in),
+                                ~ dplyr::coalesce(.x, mean(.x, na.rm = TRUE)))) |>
+    dplyr::ungroup() |>
+    dplyr::select(-.mo, -.hr) |>
+    dplyr::mutate(
+      T_air = T_air_C + 273.15,          # K
+      # Saturation / actual vapour pressure (Pa) via Magnus formula
+      e_sat = 611.0 * exp(17.27 * T_air_C / (T_air_C + 237.3)),
+      e_a   = (RH / 100) * e_sat,
+      # Brutsaert (1975) atmospheric emissivity — same as GL4
+      emissivity_atm = pmin(pmax(1.24 * (e_a / T_air)^(1/7), 0.6), 1.0),
+      LWR_in  = emissivity_atm * constants$sigma * T_air^4,
+      LWR_out = constants$emissivity * constants$sigma * constants$Tf^4,
+      albedo  = consts$albedo_ice        # constant (no albedo data for the Loch)
+    ) |>
+    dplyr::select(time, T_air, SW_in, LWR_in, LWR_out,
+                  albedo, pressure, wind, relative_humidity = RH, LW_net_station)
+
+  ice_start <- min(met_hourly$time, na.rm = TRUE)
+  ice_end   <- max(met_hourly$time, na.rm = TRUE)
+
+  # ---- 3. Ice-thickness validation data (none yet → empty, standard schema) ----
+  ice_thickness_clean <- standardize_loc_ice(read_if_path(ice_thickness),
+                                             lake_name = cfg$lake_name) |>
+    dplyr::filter(date_time >= ice_start, date_time <= ice_end)
+
+  message(sprintf("  [LOC] prepared %d hourly rows (%s – %s) | %d ice-thickness observations",
+                  nrow(met_hourly), format(ice_start, "%Y-%m-%d"),
+                  format(ice_end, "%Y-%m-%d"), nrow(ice_thickness_clean)))
+
+  n_years_run <- as.numeric(difftime(ice_end, ice_start, units = "days")) / 365.25
+
+  list(
+    lake_key      = "LOC",
+    lake_name     = cfg$lake_name,
+    time_series   = met_hourly,
+    ice_thickness = ice_thickness_clean,
+    time_model    = met_hourly$time,
+    params        = list(alpha = consts$alpha,
+                         r     = consts$alpha * consts$dt * 86400 / consts$dx^2,
+                         dt = consts$dt, dx = consts$dx,
+                         L_initial = consts$L_initial, Chi = consts$Chi,
+                         nt = nrow(met_hourly), n_years = n_years_run),
+    constants     = consts
+  )
+}
+
+
+# ============================================================
+# standardize_loc_ice
+# — Loch ice thickness → standard schema. NULL / empty input returns an
+#   empty table with the right columns. Accepts either z_water_m (m, already
+#   standard) or a GL4-style date/date_time + thickness (cm) table.
+# ============================================================
+standardize_loc_ice <- function(df, lake_name = "The Loch") {
+  empty <- tibble::tibble(location_name = character(), location = character(),
+                          date_time = as.POSIXct(character(), tz = "UTC"),
+                          z_water_m = numeric())
+  if (is.null(df) || nrow(df) == 0) return(empty)
+
+  out <- if ("z_water_m" %in% names(df)) {
+    tibble::tibble(
+      location_name = lake_name,
+      location      = if ("location" %in% names(df)) as.character(df$location) else "LOC",
+      date_time     = if (inherits(df$date_time, c("POSIXct", "Date"))) {
+                        as.POSIXct(df$date_time, tz = "UTC")
+                      } else {
+                        lubridate::parse_date_time(as.character(df$date_time),
+                          orders = c("Ymd HMS", "Ymd HM", "Ymd", "mdy HM", "mdy", "mdY"),
+                          tz = "UTC", quiet = TRUE)
+                      },
+      z_water_m     = abs(as.numeric(df$z_water_m))
+    )
+  } else {
+    standardize_gl4_ice(df, lake_name = lake_name)
+  }
+  dplyr::filter(out, !is.na(date_time), !is.na(z_water_m))
 }
 
 
@@ -1699,6 +1937,7 @@ plot_ice_model <- function(
     ice_thickness     = NULL,        # optional observed validation df
     datetime_col      = "date_time", # datetime column name in ice_thickness
     observed_col      = "z_water_m", # thickness column name in ice_thickness
+    clip_obs_to_model = TRUE,        # drop observations outside the modelled time range
     title             = "East Lake Bonney",
     subtitle          = NULL,
     plot_thickness    = TRUE,
@@ -1759,10 +1998,34 @@ plot_ice_model <- function(
       ice_theme()
     
     if (!is.null(ice_thickness)) {
+      # Fall back to common alternative column names so older / differently
+      # formatted validation tables (e.g. time/thickness or date/thickness)
+      # still plot instead of erroring.
+      pick_col <- function(preferred, fallbacks, what) {
+        hit <- c(preferred, fallbacks)[c(preferred, fallbacks) %in% names(ice_thickness)][1]
+        if (is.na(hit)) stop(sprintf(
+          "plot_ice_model(): no %s column found in ice_thickness. Looked for: %s. Columns present: %s",
+          what, paste(c(preferred, fallbacks), collapse = ", "),
+          paste(names(ice_thickness), collapse = ", ")))
+        if (hit != preferred) message(sprintf(
+          "plot_ice_model(): '%s' not found in ice_thickness; using '%s' instead.", preferred, hit))
+        hit
+      }
+      dt_col  <- pick_col(datetime_col, c("date_time", "time", "date"), "datetime")
+      obs_col <- pick_col(observed_col, c("z_water_m", "thickness"),    "thickness")
+
       obs <- ice_thickness |>
-        rename(time = all_of(datetime_col),
-               obs  = all_of(observed_col)) |>
+        rename(time = all_of(dt_col),
+               obs  = all_of(obs_col)) |>
+        mutate(time = as.POSIXct(time, tz = "UTC")) |>
         filter(!is.na(time), !is.na(obs))
+
+      # Keep only observations inside the span of modelled output, so the
+      # x-axis isn't stretched by validation data before/after the run.
+      if (clip_obs_to_model) {
+        model_range <- range(results$time[!is.na(results$thickness)], na.rm = TRUE)
+        obs <- obs |> filter(time >= model_range[1], time <= model_range[2])
+      }
       
       p_thick <- p_thick +
         geom_point(data = obs, aes(x = time, y = obs),
@@ -1894,4 +2157,60 @@ plot_ice_model <- function(
   
   print(combined)
   invisible(plots)
+}
+
+
+# ============================================================
+# load_ice_observations
+# — lightweight loader for a lake's ice-thickness validation data,
+#   returning the same schema prepare_lake_model_inputs() /
+#   prepare_gl4_model_inputs() put in inputs$ice_thickness
+#   (location_name, location, date_time, z_water_m in positive m).
+#   Applies the same lake filters (location_name, ice_loc_filter)
+#   but needs NO met data, so it is cheap to call from reports /
+#   R Markdown where only saved model outputs are loaded.
+#
+#   lake_key     : "ELB", "WLB", "LH", "LF", "GL4", or "LOC"
+#   project_path : repository root (default: working directory)
+#   time_range   : optional length-2 POSIXct; keep observations inside it
+#                  (e.g. range(results$time)). NULL = keep all.
+# ============================================================
+load_ice_observations <- function(
+    lake_key,
+    project_path = ".",
+    time_range   = NULL,
+    lake_configs = LAKE_CONFIGS
+) {
+  cfg <- lake_configs[[lake_key]]
+  if (is.null(cfg)) stop(sprintf("Unknown lake_key '%s'. Valid options: %s",
+                                 lake_key, paste(names(lake_configs), collapse = ", ")))
+
+  if (identical(lake_key, "LOC")) {
+    # No Loch ice-thickness data yet. Drop a file at Data/LOC/loc_ice_thickness.csv
+    # (z_water_m in m, or date + thickness in cm) and it will be picked up here.
+    loc_file <- file.path(project_path, "Data/LOC/loc_ice_thickness.csv")
+    loc_raw  <- if (file.exists(loc_file)) readr::read_csv(loc_file, show_col_types = FALSE) else NULL
+    obs <- standardize_loc_ice(loc_raw, lake_name = cfg$lake_name)
+  } else if (identical(lake_key, "GL4")) {
+    obs <- readr::read_csv(file.path(project_path, "Data/GL4/gl4_ice_thickness.nc.data.csv"),
+                           show_col_types = FALSE) |>
+      standardize_gl4_ice(lake_name = cfg$lake_name)
+  } else {
+    obs <- readr::read_csv(file.path(project_path, "Data/mcmlter-lake-ice_thickness-20250218_0_2025.csv"),
+                           show_col_types = FALSE) |>
+      dplyr::mutate(date_time = lubridate::mdy_hm(date_time, tz = "UTC"),
+                    z_water_m = z_water_m * -1) |>
+      dplyr::filter(location_name == cfg$lake_name)
+    if (!is.null(cfg$ice_loc_filter)) obs <- cfg$ice_loc_filter(obs)
+  }
+
+  obs <- obs |>
+    dplyr::filter(!is.na(date_time), !is.na(z_water_m)) |>
+    dplyr::select(location_name, location, date_time, z_water_m) |>
+    dplyr::arrange(date_time)
+
+  if (!is.null(time_range)) {
+    obs <- dplyr::filter(obs, date_time >= time_range[1], date_time <= time_range[2])
+  }
+  obs
 }

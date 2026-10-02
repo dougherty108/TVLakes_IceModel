@@ -1,0 +1,126 @@
+---
+title: "Antarctica to Rockies Comparison"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include = FALSE}
+# Repository root. Every path below is built from it with file.path(), so the
+# chunks work both when knitting and when run one at a time in RStudio
+# (which runs chunks from this Rmd's folder, R/, not the repo root).
+path <- path.expand("~/Library/CloudStorage/OneDrive-UCB-O365 (9-15-26 4:10 PM)/Documents/R-Repositories/TVLakes_IceModel")
+if (!dir.exists(path)) stop("Repository folder not found: ", path)
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE,
+                      fig.width = 10, fig.height = 7)
+```
+
+```{r libraries}
+source(file.path(path, "R/TEST_Optimizations/libraries.R"))
+source(file.path(path, "R/TEST_Optimizations/functions.R"))
+```
+
+```{r load-data}
+# One row per lake: which saved model output to read. Add/remove lakes here.
+lakes <- tibble::tribble(
+  ~lake_key, ~output_file,
+  "WLB",     "Data/model_outputs/WLB_2017_2024_output.csv",
+  "ELB",     "Data/model_outputs/ELB_2017_2024_output.csv",
+  "LH",      "Data/model_outputs/LH_2017_2024_output.csv",
+  "LF",      "Data/model_outputs/LF_2017_2024_output.csv",
+  "GL4",     "Data/model_outputs/GL4_2014_2025_output.csv",
+  "LOC",     "Data/model_outputs/LOC_2017_2024_output.csv"
+)
+
+# Saved model output for each lake (named list: results$ELB, results$GL4, ...)
+results <- lakes$output_file |>
+  purrr::map(~ readr::read_csv(file.path(path, .x), show_col_types = FALSE)) |>
+  purrr::set_names(lakes$lake_key)
+
+# Matching ice-thickness observations for each lake, clipped to that lake's
+# modelled period. load_ice_observations() applies the same lake/location
+# filters as the 00_ prep scripts, but needs no met data.
+ice_obs <- purrr::imap(results, function(res, key) {
+  load_ice_observations(key, project_path = path,
+                        time_range = range(res$time, na.rm = TRUE))
+})
+
+# Plot one lake: model vs observations. Saved CSVs don't keep the
+# temperature-profile list columns, so that panel is switched off.
+plot_lake <- function(key) {
+  res <- results[[key]]
+  plot_ice_model(
+    res,
+    ice_thickness     = ice_obs[[key]],
+    title             = LAKE_CONFIGS[[key]]$lake_name,
+    subtitle          = sprintf("%s – %s | %s",
+                                format(min(res$time), "%Y-%m-%d"),
+                                format(max(res$time), "%Y-%m-%d"),
+                                if (nrow(ice_obs[[key]]) > 0)
+                                  paste(nrow(ice_obs[[key]]), "ice-thickness observations")
+                                else "no ice-thickness observations yet"),
+    plot_temp_profile = FALSE
+  )
+}
+```
+
+## Ice thickness: all lakes
+
+```{r all-lakes, fig.height = 13}
+model_daily <- purrr::imap_dfr(results, function(res, key) {
+  res |>
+    dplyr::mutate(day = lubridate::floor_date(time, "day")) |>
+    dplyr::group_by(day) |>
+    dplyr::summarise(thickness = mean(thickness, na.rm = TRUE), .groups = "drop") |>
+    dplyr::mutate(lake = LAKE_CONFIGS[[key]]$lake_name)
+})
+obs_all <- purrr::imap_dfr(ice_obs, ~ dplyr::mutate(.x, lake = LAKE_CONFIGS[[.y]]$lake_name))
+
+lake_levels <- purrr::map_chr(lakes$lake_key, ~ LAKE_CONFIGS[[.x]]$lake_name)
+model_daily$lake <- factor(model_daily$lake, levels = lake_levels)
+obs_all$lake     <- factor(obs_all$lake,     levels = lake_levels)
+
+ggplot(model_daily, aes(day, thickness)) +
+  geom_line(colour = "#2166ac", linewidth = 0.6) +
+  geom_point(data = obs_all, aes(date_time, z_water_m),
+             colour = "#d6604d", size = 1.4, alpha = 0.8) +
+  facet_wrap(~ lake, ncol = 1, scales = "free") +
+  labs(x = NULL, y = "Ice thickness (m)",
+       caption = "Line = modelled (daily mean); points = observed") +
+  theme_minimal(base_size = 12) +
+  theme(strip.text = element_text(face = "bold", hjust = 0),
+        panel.grid.minor = element_blank())
+```
+
+## Individual lakes {.tabset}
+
+### West Lake Bonney
+```{r wlb}
+plot_lake("WLB")
+```
+
+### East Lake Bonney
+```{r elb}
+plot_lake("ELB")
+```
+
+### Lake Hoare
+```{r lh}
+plot_lake("LH")
+```
+
+### Lake Fryxell
+```{r lf}
+plot_lake("LF")
+```
+
+### Green Lake 4
+```{r gl4}
+plot_lake("GL4")
+```
+
+### The Loch
+```{r loc}
+plot_lake("LOC")
+```

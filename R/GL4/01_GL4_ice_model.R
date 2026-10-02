@@ -1,55 +1,55 @@
-######## GL4 (Green Lake 4, Niwot Ridge) — seasonal ice model run ############
+###### Ice Thickness Model — Green Lake 4 (GL4) ########
+
+### Authors
+# Charlie Dougherty
+
+# NOTES
+# This script models ice thickness at an adjustable vertical depth and timestep
+# through time at Green Lake 4, Niwot Ridge, Colorado. Ice thickness is
+# modeled by solving the heat equation in the vertical axis iteratively, and
+# correcting for surface/bottom mass balance via the surface energy fluxes.
 #
-# Runs the 1-D ice thickness model on GL4. Because GL4 is a seasonally frozen
-# lake (seasonally_frozen = TRUE in LAKE_CONFIGS), run_ice_model() cycles
-# between:
-#   • "ice" phase   : standard 1-D conductive ice model
-#   • "open_water"  : mixed-layer energy balance; nucleates ice when T_water
-#                     reaches Tf while the surface is losing heat
+# GL4 is seasonally frozen (LAKE_CONFIGS$GL4$seasonally_frozen = TRUE), so
+# run_ice_model() switches between an "ice" phase and an "open_water"
+# mixed-layer phase that nucleates new ice in autumn. Results therefore carry
+# two extra columns vs the Antarctic lakes: `phase` and `T_water`.
 #
-# The model output includes two extra columns vs perennial lakes:
-#   phase   — "ice" | "open_water" at each timestep
-#   T_water — mixed-layer temperature (K); NA during ice phase
+# Data is provided by the Niwot Ridge Long Term Ecological Research project
+# (D1 met station and GL4 ice thickness).
 #
-# Before running this script, source 00_GL4_data_preparation.R (or just run
-# it interactively — this script re-sources it automatically).
-###############################################################################
+# This driver is a thin wrapper around the lake-agnostic functions in
+# R/TEST_Optimizations/functions.R: prepare_model_input(), run_ice_model(),
+# lake_constants(), and plot_ice_model(). All GL4-specific choices live in
+# LAKE_CONFIGS$GL4 and were already applied when `inputs` was built in
+# 00_GL4_data_preparation.R.
 
 source("R/TEST_Optimizations/libraries.R")
 source("R/TEST_Optimizations/functions.R")
-source("R/GL4/00_GL4_data_preparation.R")
 
 lake_key <- "GL4"
 
-# ---- Scenario assumptions ---------------------------------------------------
-warming_rate <- 0.00   # K/yr added to T_air; 0 = historical forcing unchanged
-albedo_rate  <- 0.00   # /yr added to albedo; 0 = constant ice albedo from config
+# Build (or rebuild) the model-ready inputs. Adjust `n_years` in
+# 00_GL4_data_preparation.R to change how many years the model runs for.
+source("R/GL4/00_GL4_data_preparation.R")
 
-# ---- Prepare model input ----------------------------------------------------
-# prepare_model_input() applies optional warming/albedo trends and adds the
-# delta_T column required by run_ice_model(). gl4_constants carries
-# seasonally_frozen = TRUE and albedo_ice from LAKE_CONFIGS$GL4.
+###################### Apply warming trend (observed pathway) ######################
+# Set warming_rate = 0 for no trend, or > 0 to apply a compounding annual
+# warming trend to T_air (and recompute LWR_out / delta_T as needed).
+warming_rate <- 0.000   # 0.3% per year
+
 ts_ready_GL4 <- prepare_model_input(
-  time_series  = time_series,
+  inputs$time_series,
   warming_rate = warming_rate,
-  albedo_rate  = albedo_rate,
-  constants    = gl4_constants
+  constants    = lake_constants(lake_key)
 )
 
-# ---- Run the model ----------------------------------------------------------
-message("\n[GL4] Running seasonal ice model...")
-results_GL4<- run_ice_model(
+###################### Run the ice thickness model ######################
+results_GL4 <- run_ice_model(
   ts_ready_GL4,
-  constants     = gl4_constants,
-  show_progress = TRUE
+  constants = lake_constants(lake_key)
 )
 
-message(sprintf(
-  "[GL4] Done. %d timesteps | ice-on fraction: %.1f%%",
-  nrow(results),
-  100 * mean(results$phase == "ice", na.rm = TRUE)
-))
-
+###################### Plot results vs. observations ######################
 plot_ice_model(
   results_GL4,
   ice_thickness = inputs$ice_thickness,
@@ -58,75 +58,5 @@ plot_ice_model(
                           inputs$params$n_years, warming_rate * 100)
 )
 
-
-# ---- Plot: ice thickness + phase + T_water ----------------------------------
-# Panel 1: ice thickness coloured by phase
-p_thickness <- results |>
-  mutate(phase = if_else(is.na(phase), "ice", phase)) |>
-  ggplot(aes(x = time, y = thickness, colour = phase)) +
-  geom_line(linewidth = 0.5, alpha = 0.85) +
-  scale_colour_manual(
-    values = c(ice = "#3B8BD4", open_water = "#E8593C"),
-    labels = c(ice = "Ice", open_water = "Open water"),
-    name   = "Phase"
-  ) +
-  # Overlay observed ice thickness as points
-  geom_point(
-    data    = ice_thickness |> filter(time >= min(results$time),
-                                      time <= max(results$time)),
-    aes(x = time, y = thickness),
-    inherit.aes = FALSE,
-    colour = "black", shape = 21, fill = "white", size = 2.5, stroke = 0.8
-  ) +
-  labs(
-    title    = "GL4 — modelled ice thickness (line) vs observed (points)",
-    subtitle = sprintf("warming_rate = %.2f K/yr  |  albedo = %.2f (constant)",
-                       warming_rate, gl4_constants$albedo_ice),
-    x        = NULL,
-    y        = "Ice thickness (m)"
-  ) +
-  theme_minimal(base_size = 13) +
-  theme(legend.position = "bottom")
-
-# Panel 2: mixed-layer water temperature (open-water phase only)
-p_T_water <- results |>
-  filter(!is.na(T_water)) |>
-  ggplot(aes(x = time, y = T_water - 273.15)) +
-  geom_line(linewidth = 0.5, colour = "#E8593C", alpha = 0.8) +
-  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
-  labs(
-    x = NULL,
-    y = "Mixed-layer T (°C)"
-  ) +
-  theme_minimal(base_size = 13)
-
-# Panel 3: net surface heat flux
-p_flux <- results |>
-  ggplot(aes(x = time, y = surface_heat_flux)) +
-  geom_line(linewidth = 0.3, colour = "grey40", alpha = 0.7) +
-  geom_hline(yintercept = 0, linetype = "dashed", colour = "black") +
-  labs(x = NULL, y = "Surface flux (W m⁻²)") +
-  theme_minimal(base_size = 13)
-
-gl4_plot <- p_thickness / p_T_water / p_flux +
-  plot_annotation(
-    title = "GL4 Green Lake 4 — seasonal freeze-thaw model",
-    theme = theme(plot.title = element_text(size = 15, face = "bold"))
-  )
-
-print(gl4_plot)
-
-# ---- Summary statistics per calendar year -----------------------------------
-annual_summary <- results |>
-  mutate(year = lubridate::year(time)) |>
-  group_by(year) |>
-  summarise(
-    mean_thickness_m   = mean(thickness,  na.rm = TRUE),
-    max_thickness_m    = max(thickness,   na.rm = TRUE),
-    ice_on_fraction    = mean(phase == "ice", na.rm = TRUE),
-    mean_T_water_degC  = mean(T_water - 273.15, na.rm = TRUE),
-    .groups = "drop"
-  )
-
-message("\n[GL4] Annual summary:")
-print(annual_summary, n = Inf)
+# write output to model_outputs folder
+write_csv(results_GL4, "Data/model_outputs/GL4_2014_2025_output.csv")
