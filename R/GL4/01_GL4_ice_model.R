@@ -19,6 +19,8 @@ source("R/TEST_Optimizations/libraries.R")
 source("R/TEST_Optimizations/functions.R")
 source("R/GL4/00_GL4_data_preparation.R")
 
+lake_key <- "GL4"
+
 # ---- Scenario assumptions ---------------------------------------------------
 warming_rate <- 0.00   # K/yr added to T_air; 0 = historical forcing unchanged
 albedo_rate  <- 0.00   # /yr added to albedo; 0 = constant ice albedo from config
@@ -27,7 +29,7 @@ albedo_rate  <- 0.00   # /yr added to albedo; 0 = constant ice albedo from confi
 # prepare_model_input() applies optional warming/albedo trends and adds the
 # delta_T column required by run_ice_model(). gl4_constants carries
 # seasonally_frozen = TRUE and albedo_ice from LAKE_CONFIGS$GL4.
-ts_ready <- prepare_model_input(
+ts_ready_GL4 <- prepare_model_input(
   time_series  = time_series,
   warming_rate = warming_rate,
   albedo_rate  = albedo_rate,
@@ -36,8 +38,8 @@ ts_ready <- prepare_model_input(
 
 # ---- Run the model ----------------------------------------------------------
 message("\n[GL4] Running seasonal ice model...")
-results <- run_ice_model(
-  ts_ready,
+results_GL4<- run_ice_model(
+  ts_ready_GL4,
   constants     = gl4_constants,
   show_progress = TRUE
 )
@@ -47,6 +49,15 @@ message(sprintf(
   nrow(results),
   100 * mean(results$phase == "ice", na.rm = TRUE)
 ))
+
+plot_ice_model(
+  results_GL4,
+  ice_thickness = inputs$ice_thickness,
+  title         = inputs$lake_name,
+  subtitle      = sprintf("%.1f-year run | %.1f%% annual warming applied to T_air",
+                          inputs$params$n_years, warming_rate * 100)
+)
+
 
 # ---- Plot: ice thickness + phase + T_water ----------------------------------
 # Panel 1: ice thickness coloured by phase

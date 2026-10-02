@@ -161,10 +161,11 @@ LAKE_CONFIGS <- list(
 
   GL4 = list(
     lake_name         = "Green Lake 4",
-    L_initial         = 0.0,    # start ice-free; model will nucleate ice when conditions allow
+    L_initial         = 0.10,   # = dx; start ice-covered (1 Jan is mid-winter) on a valid 2-node grid
+    L_nucleation      = 0.10,   # = dx; new ice forms at one grid step so the profile can grow
     Chi               = 0.40,
     albedo_multiplier = 1.00,
-    albedo_ice        = 0.60,   # constant dummy albedo — no AlbedoModel.csv for GL4
+    albedo_ice        = 0.85,   # constant dummy albedo — no AlbedoModel.csv for GL4
     seasonally_frozen = TRUE,
     start_filter      = as.POSIXct("2014-01-01 00:00:00"),
 
@@ -201,6 +202,7 @@ lake_constants <- function(lake_key, lake_configs = LAKE_CONFIGS, constants = CO
   # propagate optional per-lake constants when present
   if (!is.null(cfg$seasonally_frozen)) overrides$seasonally_frozen <- cfg$seasonally_frozen
   if (!is.null(cfg$albedo_ice))        overrides$albedo_ice        <- cfg$albedo_ice
+  if (!is.null(cfg$L_nucleation))      overrides$L_nucleation      <- cfg$L_nucleation
   modifyList(constants, overrides)
 }
 
@@ -795,18 +797,49 @@ prepare_gl4_model_inputs <- function(
   met_raw <- met_raw |>
     dplyr::mutate(bp_avg = bp_avg * 100)
 
+  # Coalesce air temperature and RH across D1 sensors.
+  # The D1 logger changed sensors in 2019: airtemp_avg / rh_avg / rh_max / rh_min
+  # stop in 2019, the HMP columns only start then, and rh_hmp1_avg is empty for
+  # 2014–2018. Using a single column left LWR_in NA in every hour, so the model
+  # never froze. HMP values in late 2018 – Feb 2019 are bad (e.g. −157 °C), so
+  # prefer the original sensors and screen out physically impossible values.
+  in_range <- function(x, lo, hi) dplyr::if_else(!is.na(x) & x >= lo & x <= hi, x, NA_real_)
+  met_raw <- met_raw |>
+    dplyr::mutate(
+      T_air_C_raw = dplyr::coalesce(in_range(airtemp_avg,      -50, 35),
+                                    in_range(airtemp_hmp1_avg, -50, 35),
+                                    in_range(airtemp_hmp2_avg, -50, 35),
+                                    in_range(airtemp_hmp3_avg, -50, 35)),
+      RH_raw      = dplyr::coalesce(in_range(rh_avg,      0, 100),
+                                    in_range(rh_hmp1_avg, 0, 100),
+                                    in_range(rh_hmp2_avg, 0, 100),
+                                    in_range(rh_hmp3_avg, 0, 100),
+                                    in_range((rh_max + rh_min) / 2, 0, 100))
+    )
+
   # ---- 2. Aggregate to hourly ----
   met_hourly <- met_raw |>
     dplyr::mutate(time = lubridate::floor_date(time, "hour")) |>
     dplyr::group_by(time) |>
     dplyr::summarise(
-      T_air_C           = mean(airtemp_avg,   na.rm = TRUE),
-      RH                = mean(rh_hmp1_avg,   na.rm = TRUE),
+      T_air_C           = mean(T_air_C_raw,   na.rm = TRUE),
+      RH                = mean(RH_raw,        na.rm = TRUE),
       pressure          = mean(bp_avg,         na.rm = TRUE),
       wind              = mean(ws_avg,         na.rm = TRUE),
       SW_in             = mean(solrad_avg,     na.rm = TRUE),
       .groups = "drop"
     ) |>
+    dplyr::mutate(dplyr::across(c(T_air_C, RH, pressure, wind, SW_in),
+                                ~ dplyr::if_else(is.nan(.x), NA_real_, .x))) |>
+    # short gaps (≤ 6 h): linear interpolation
+    dplyr::mutate(dplyr::across(c(T_air_C, RH, pressure, wind, SW_in),
+                                ~ zoo::na.approx(.x, na.rm = FALSE, maxgap = 6))) |>
+    # longer gaps: month × hour-of-day climatology so the model never sees NA forcing
+    dplyr::group_by(.mo = lubridate::month(time), .hr = lubridate::hour(time)) |>
+    dplyr::mutate(dplyr::across(c(T_air_C, RH, pressure, wind, SW_in),
+                                ~ dplyr::coalesce(.x, mean(.x, na.rm = TRUE)))) |>
+    dplyr::ungroup() |>
+    dplyr::select(-.mo, -.hr) |>
     dplyr::mutate(
       T_air = T_air_C + 273.15,          # K
       # Saturation vapour pressure (Pa) via Magnus formula
@@ -1369,7 +1402,18 @@ run_ice_model <- function(
       newL <- prevL - dL_surface
 
       dL_bottom <- 0
-      if (!is.na(newL) && newL > 0 && n_nodes >= 2) {
+      if (seasonally_frozen && !is.na(newL) && newL > 0 && newL < 2 * dx) {
+        # GL4 / seasonally frozen lakes only — thin-ice growth.
+        # Ice thinner than 2*dx collapses to a 1-node grid (e.g. 2 mm nucleated
+        # ice with dx = 0.1 m), so the finite-difference basal flux below can
+        # never fire and the ice would stay frozen at L_nucleation all winter.
+        # Instead assume a linear profile T_air -> Tf across the ice and grow it
+        # with the integrated Stefan solution (stable for any thickness).
+        dT_ice    <- if (is.na(T_air)) 0 else max(0, Tf - T_air)
+        L_next    <- sqrt(newL^2 + 2 * k * dT_ice * dt_sec / (rho * L_f))
+        dL_bottom <- L_next - newL
+        newL      <- L_next
+      } else if (!is.na(newL) && newL > 0 && n_nodes >= 2) {
         Q_bottom  <- -k * (newT[n_nodes - 1] - newT[n_nodes]) / dx
         dL_bottom <- Q_bottom * dt_sec / (rho * L_f)
         newL      <- newL + dL_bottom
@@ -1418,9 +1462,11 @@ run_ice_model <- function(
       LWR_out_water <- emissivity * sigma * T_water^4
       LW_net <- LWR_in - LWR_out_water
 
-      # Sensible heat (bulk aerodynamic; delta_T here = T_water - T_air)
+      # Sensible heat (bulk aerodynamic). Positive = heat INTO the water, so the
+      # gradient is air minus water: cold air over warmer water cools the lake.
+      # (Was T_water - T_air, which warmed the lake in winter so it never refroze.)
       rho_air     <- (press * Ma) * 0.1 / (R * T_air)
-      dT_bulk     <- T_water - T_air
+      dT_bulk     <- T_air - T_water
       Qh          <- rho_air * Ca * Ch * dT_bulk * wind
 
       # Latent heat from open water surface

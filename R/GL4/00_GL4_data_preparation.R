@@ -19,8 +19,8 @@ source("R/TEST_Optimizations/libraries.R")
 source("R/TEST_Optimizations/functions.R")
 
 # ---- File paths (relative to project root) ----------------------------------
-met_csv <- "Data/gl4/d-1cr23x-cr1000.10minute.ml.data.csv"
-ice_csv <- "Data/gl4/gl4_ice_thickness.nc.data.csv"
+met_csv <- "Data/GL4/d-1cr23x-cr1000.10minute.ml.data.csv"
+ice_csv <- "Data/GL4/gl4_ice_thickness.nc.data.csv"
 
 # ---- Prepare inputs ---------------------------------------------------------
 # start_filter: D1 station data begins 2013-12-31; skip the partial first day.

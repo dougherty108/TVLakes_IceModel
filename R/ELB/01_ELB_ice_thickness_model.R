@@ -33,23 +33,26 @@ source("R/ELB/00_ELB_data_preparation.R")
 # warming trend to T_air (and recompute LWR_out / delta_T as needed).
 warming_rate <- 0.000   # 0.3% per year
 
-ts_ready <- prepare_model_input(
+ts_ready_ELB <- prepare_model_input(
   inputs$time_series,
   warming_rate = warming_rate,
   constants    = lake_constants(lake_key)
 )
 
 ###################### Run the ice thickness model ######################
-results <- run_ice_model(
-  ts_ready,
+results_ELB <- run_ice_model(
+  ts_ready_ELB,
   constants = lake_constants(lake_key)
 )
 
 ###################### Plot results vs. observations ######################
 plot_ice_model(
-  results,
+  results_ELB,
   ice_thickness = inputs$ice_thickness,
   title         = inputs$lake_name,
   subtitle      = sprintf("%.1f-year run | %.1f%% annual warming applied to T_air",
                           inputs$params$n_years, warming_rate * 100)
 )
+
+# write output to model_outputs folder
+write_csv(results_ELB, "Data/model_outputs/ELB_2017_2024_output.csv")
