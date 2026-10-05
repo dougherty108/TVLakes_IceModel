@@ -59,4 +59,24 @@ plot_ice_model(
 )
 
 # write output to model_outputs folder
-write_csv(results_GL4, "Data/model_outputs/GL4_2014_2025_output.csv")
+#write_csv(results_GL4, "Data/model_outputs/GL4_2014_2025_output.csv")
+
+# quick plot to compare modeled ice thickness to measured ice thickness
+results_GL4_v2 = results_GL4 |> 
+  mutate(date_time = time)
+
+GL4_ice = read_csv("Data/GL4/gl4_ice_thickness.nc.data.csv") |> 
+  mutate(date_time = as.POSIXct(mdy(date_time), tz = "UTC"))
+
+gl4_overlap = GL4_ice |> 
+  left_join(results_GL4_v2, by = join_by(date_time)) |> 
+  mutate(month = month(date_time)) |> 
+  drop_na(time)
+
+ggplot(gl4_overlap, aes(thickness.x / 100, thickness.y)) + 
+  geom_point(aes(color = as.character(month))) + 
+  #geom_smooth(method = "lm") + 
+  xlab("NWT Measured Ice Thickness (m)") + ylab("Modeled Ice Thickness (m)") + 
+  ggtitle("Modeled Ice Thickness vs. Measured Ice Thickness") + 
+  geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed", linewidth = 1) + 
+  theme_bw()

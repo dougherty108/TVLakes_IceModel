@@ -124,3 +124,285 @@ plot_lake("GL4")
 ```{r loc}
 plot_lake("LOC")
 ```
+
+## Surface energy fluxes
+
+All fluxes are in W m⁻² and are calculated only for **ice-covered** time steps,
+so the open-water season at Green Lake 4 and The Loch is left out. Signs follow
+the model's surface energy balance:
+
+*net surface flux = absorbed SW + net LW + sensible + latent − Q~c~*
+
+Positive values add energy to the ice surface and can drive melt; negative
+values remove energy. The conductive term is shown as it enters the balance
+(−Q~c~), so its sign is comparable with the other fluxes.
+
+```{r flux-prep}
+flux_vars <- c(SW_abs       = "Absorbed shortwave",
+               LW_net       = "Net longwave",
+               sensible_Q   = "Sensible heat",
+               latent_Q     = "Latent heat",
+               conductive_Q = "Conductive (−Qc)")
+# Okabe–Ito hues: colour-blind safe; every chart also has a legend and/or a table
+flux_cols <- setNames(c("#E69F00", "#0072B2", "#D55E00", "#009E73", "#CC79A7"),
+                      flux_vars)
+
+region_of    <- c(WLB = "McMurdo Dry Valleys", ELB = "McMurdo Dry Valleys",
+                  LH  = "McMurdo Dry Valleys", LF  = "McMurdo Dry Valleys",
+                  GL4 = "Colorado Rockies",    LOC = "Colorado Rockies")
+lake_name_of <- purrr::map_chr(LAKE_CONFIGS, "lake_name")
+
+# Long table: one row per lake x time step x flux, ice-covered steps only.
+# conductive_Q is negated so it carries the sign it has in the balance.
+flux_long <- purrr::imap_dfr(results, function(res, key) {
+  if (!"phase" %in% names(res)) res$phase <- "ice"   # perennial lakes: always ice
+  res |>
+    dplyr::filter(phase == "ice") |>
+    dplyr::mutate(conductive_Q = -conductive_Q) |>
+    dplyr::select(time, dplyr::all_of(names(flux_vars))) |>
+    tidyr::pivot_longer(-time, names_to = "flux_key", values_to = "value") |>
+    dplyr::filter(!is.na(value)) |>
+    dplyr::mutate(lake_key = key)
+}) |>
+  dplyr::mutate(
+    lake   = factor(lake_name_of[lake_key], levels = lake_levels),
+    region = factor(region_of[lake_key],
+                    levels = c("McMurdo Dry Valleys", "Colorado Rockies")),
+    flux   = factor(flux_vars[flux_key], levels = flux_vars)
+  )
+
+# Whole-record statistics per lake and flux
+flux_summary <- flux_long |>
+  dplyr::group_by(region, lake, lake_key, flux) |>
+  dplyr::summarise(mean_signed = mean(value),
+                   mean_abs    = mean(abs(value)),
+                   p05         = unname(quantile(value, 0.05)),
+                   p95         = unname(quantile(value, 0.95)),
+                   n_steps     = dplyr::n(),
+                   first       = min(time),
+                   last        = max(time),
+                   .groups = "drop") |>
+  dplyr::group_by(lake) |>
+  dplyr::mutate(share_abs = mean_abs / sum(mean_abs)) |>
+  dplyr::ungroup()
+
+flux_net <- flux_summary |>
+  dplyr::group_by(region, lake, lake_key) |>
+  dplyr::summarise(net = sum(mean_signed), .groups = "drop")
+
+# Monthly climatology. Months with < 10 days of ice cover across the whole
+# record (freeze-up / break-up months at the seasonal lakes) are dropped, and
+# months with no ice are kept as NA so lines break rather than bridge the gap.
+min_steps_month <- 24 * 10
+flux_monthly <- flux_long |>
+  dplyr::mutate(month = lubridate::month(time)) |>
+  dplyr::group_by(region, lake, lake_key, flux, month) |>
+  dplyr::summarise(lo    = unname(quantile(value, 0.10)),
+                   hi    = unname(quantile(value, 0.90)),
+                   value = mean(value),
+                   n     = dplyr::n(), .groups = "drop") |>
+  dplyr::filter(n >= min_steps_month) |>
+  tidyr::complete(tidyr::nesting(region, lake, lake_key), flux, month = 1:12)
+
+flux_theme <- theme_minimal(base_size = 12) +
+  theme(strip.text       = element_text(face = "bold", hjust = 0),
+        panel.grid.minor = element_blank(),
+        legend.position  = "top")
+```
+
+### Flux magnitude across sites
+
+```{r flux-magnitude, fig.height = 6}
+ggplot(flux_summary, aes(mean_abs, forcats::fct_rev(lake), colour = flux)) +
+  geom_point(size = 3.5, alpha = 0.9) +
+  scale_x_log10(breaks = 10^(-3:2),
+                labels = c("0.001", "0.01", "0.1", "1", "10", "100")) +
+  scale_colour_manual(values = flux_cols, name = NULL) +
+  facet_grid(region ~ ., scales = "free_y", space = "free_y") +
+  labs(x = "Mean absolute flux (W m⁻², log scale)", y = NULL,
+       title = "How large is each flux?",
+       subtitle = "Mean |flux| over all ice-covered hours. Each gridline is a factor of 10.") +
+  flux_theme +
+  guides(colour = guide_legend(nrow = 1))
+```
+
+```{r flux-magnitude-table}
+flux_summary |>
+  dplyr::mutate(cell = sprintf("%.3g (%.0f%%)", mean_abs, 100 * share_abs)) |>
+  dplyr::select(Region = region, Lake = lake, flux, cell) |>
+  tidyr::pivot_wider(names_from = flux, values_from = cell) |>
+  knitr::kable(caption = "Mean |flux| in W m⁻² (share of the lake's total flux magnitude)",
+               align = "llrrrrr")
+```
+
+### Energy sources and sinks
+
+```{r flux-signed, fig.height = 6}
+ggplot(flux_summary, aes(mean_signed, forcats::fct_rev(lake), fill = flux)) +
+  geom_col(width = 0.65, colour = "white", linewidth = 0.4) +
+  geom_vline(xintercept = 0, colour = "grey30") +
+  geom_point(data = flux_net, aes(net, forcats::fct_rev(lake)),
+             inherit.aes = FALSE, shape = 23, size = 3.5,
+             fill = "black", colour = "white") +
+  scale_fill_manual(values = flux_cols, name = NULL) +
+  facet_grid(region ~ ., scales = "free_y", space = "free_y") +
+  labs(x = "Mean flux (W m⁻²)", y = NULL,
+       title = "What adds and removes energy at the ice surface?",
+       subtitle = "Bars to the right add energy, bars to the left remove it. Diamond = mean net surface flux.") +
+  flux_theme +
+  guides(fill = guide_legend(nrow = 1))
+```
+
+```{r flux-signed-table}
+flux_summary |>
+  dplyr::mutate(cell = sprintf("%+.2f", mean_signed)) |>
+  dplyr::select(Region = region, Lake = lake, flux, cell) |>
+  tidyr::pivot_wider(names_from = flux, values_from = cell) |>
+  dplyr::left_join(dplyr::transmute(flux_net, Lake = lake,
+                                    `Net surface flux` = sprintf("%+.2f", net)),
+                   by = "Lake") |>
+  knitr::kable(caption = "Mean signed flux in W m⁻² (ice-covered hours)",
+               align = "llrrrrrr")
+```
+
+### Seasonal cycle
+
+```{r flux-seasonal, fig.height = 10}
+ggplot(flux_monthly, aes(month, value, colour = flux)) +
+  geom_hline(yintercept = 0, colour = "grey60") +
+  geom_line(linewidth = 0.8, na.rm = TRUE) +
+  geom_point(size = 1.6, na.rm = TRUE) +
+  scale_x_continuous(breaks = 1:12, labels = substr(month.abb, 1, 1)) +
+  scale_colour_manual(values = flux_cols, name = NULL) +
+  facet_wrap(~ lake, ncol = 2) +
+  labs(x = NULL, y = "Monthly mean flux (W m⁻²)",
+       title = "Monthly flux climatology",
+       subtitle = "Dry Valleys summer = Dec–Jan; Rockies summer = Jun–Jul.\nGaps = open water (< 10 days of ice in that month).") +
+  flux_theme +
+  guides(colour = guide_legend(nrow = 1))
+```
+
+### Comparing the regions
+
+```{r region-numbers}
+reg <- flux_summary |>
+  dplyr::group_by(region, flux) |>
+  dplyr::summarise(mean_abs = mean(mean_abs), mean_signed = mean(mean_signed),
+                   .groups = "drop")
+rv <- function(r, f, what = "mean_abs") {
+  reg[[what]][reg$region == r & reg$flux == flux_vars[[f]]]
+}
+mdv <- "McMurdo Dry Valleys"; rmt <- "Colorado Rockies"
+```
+
+- **Radiation and conduction dominate everywhere.** At every lake, absorbed
+  shortwave, net longwave and conduction together make up more than
+  `r sprintf("%.0f%%", 100 * min(dplyr::summarise(dplyr::group_by(dplyr::filter(flux_summary, flux %in% flux_vars[c("SW_abs","LW_net","conductive_Q")]), lake), s = sum(share_abs))$s))`
+  of the total flux magnitude. Sensible heat is about 0.5 W m⁻² and latent
+  heat about 0.001–0.01 W m⁻², which is one to four orders of magnitude
+  smaller.
+- **The Dry Valley lakes run on stronger radiation.** Mean absorbed SW is
+  `r sprintf("%.0f", rv(mdv, "SW_abs"))` W m⁻² in the Dry Valleys versus
+  `r sprintf("%.0f", rv(rmt, "SW_abs"))` W m⁻² in the Rockies, and net LW is
+  `r sprintf("%.0f", rv(mdv, "LW_net", "mean_signed"))` versus
+  `r sprintf("%.0f", rv(rmt, "LW_net", "mean_signed"))` W m⁻². At the
+  Antarctic lakes net LW is a sink in every month. It is largest in summer,
+  when it partly offsets the 24-hour sun. Absorbed SW falls to zero through
+  the polar night (May–Aug).
+- **The Rockies lakes are frozen only during the low-sun half of the year.**
+  Their ice season runs from about Oct/Nov to Jun/Jul, so they skip the
+  months when SW would be largest. Net LW at these lakes switches from a
+  winter sink to a spring source as the air warms, and that spring LW gain
+  together with SW drives ice-out.
+- **Conduction moves energy around but adds almost none.** Averaged over the
+  record, −Q~c~ is near zero at every lake. Its hourly swings, however, are
+  as large as the radiative terms (5th–95th percentile roughly ±25–45 W m⁻²):
+  conduction carries heat into and out of the ice through the daily cycle
+  but adds or removes very little over a full season.
+
+### Flux budget by lake {.tabset}
+
+```{r flux-describe-fn}
+fmt <- function(x, d = 1) formatC(x, format = "f", digits = d, big.mark = ",")
+fmt_flux <- function(x) ifelse(abs(x) < 0.1, formatC(x, format = "g", digits = 2),
+                               fmt(x))
+
+describe_fluxes <- function(key) {
+  s   <- dplyr::filter(flux_summary, lake_key == key)
+  m   <- dplyr::filter(flux_monthly, lake_key == key, !is.na(value))
+  net <- flux_net$net[flux_net$lake_key == key]
+  get <- function(f, col) s[[col]][s$flux == flux_vars[[f]]]
+
+  ranked  <- dplyr::arrange(s, dplyr::desc(mean_abs))
+  rank_tx <- paste0(ranked$flux[1:3], " (", fmt_flux(ranked$mean_abs[1:3]),
+                    " W m⁻², ", sprintf("%.0f%%", 100 * ranked$share_abs[1:3]), ")")
+  src  <- dplyr::slice_max(s, mean_signed, n = 1)
+  sink <- dplyr::slice_min(s, mean_signed, n = 1)
+
+  sw_m <- dplyr::filter(m, flux == flux_vars[["SW_abs"]])
+  lw_m <- dplyr::filter(m, flux == flux_vars[["LW_net"]])
+  net_m <- m |> dplyr::group_by(month) |> dplyr::summarise(net = sum(value), .groups = "drop")
+  pos_months <- month.abb[net_m$month[net_m$net > 0]]
+  ice_months <- month.abb[sort(unique(m$month))]
+
+  n_days <- s$n_steps[1] / 24
+  paste0(
+    "**", lake_name_of[[key]], "** (", region_of[[key]], "). This summary covers ",
+    fmt(n_days, 0), " ice-covered days between ", format(s$first[1], "%b %Y"),
+    " and ", format(s$last[1], "%b %Y"),
+    if (length(ice_months) < 12)
+      paste0(" (ice in ", paste(ice_months, collapse = ", "), ")") else "",
+    ".\n\n",
+    "- **Largest fluxes by magnitude:** ", paste(rank_tx, collapse = "; "), ".\n",
+    "- **Main energy source:** ", src$flux, " (mean ", sprintf("%+.1f", src$mean_signed),
+    " W m⁻²). **Main sink:** ", sink$flux, " (", sprintf("%+.1f", sink$mean_signed),
+    " W m⁻²). The mean net surface flux is ", sprintf("%+.1f", net), " W m⁻²",
+    if (net < 0) ", so on average the surface loses energy and surface melt is limited to the warmest hours."
+    else ", so on average the surface gains energy, which favours surface melt.", "\n",
+    "- **Seasonality:** absorbed SW peaks in ",
+    month.abb[sw_m$month[which.max(sw_m$value)]], " (", fmt(max(sw_m$value)), " W m⁻²)",
+    " and net LW is most negative in ", month.abb[lw_m$month[which.min(lw_m$value)]],
+    " (", fmt(min(lw_m$value)), " W m⁻²). ",
+    if (length(pos_months) > 0)
+      paste0("The monthly mean net flux is positive (melt-favouring) in ",
+             paste(pos_months, collapse = ", "), ".")
+    else "The monthly mean net flux is negative in every month.", "\n",
+    "- **Conduction:** the mean is ", sprintf("%+.2f", get("conductive_Q", "mean_signed")),
+    " W m⁻², but hourly values span ", fmt(get("conductive_Q", "p05")), " to ",
+    fmt(get("conductive_Q", "p95")), " W m⁻² (5th–95th percentile).\n",
+    "- **Turbulent fluxes:** sensible ", fmt_flux(get("sensible_Q", "mean_signed")),
+    " W m⁻² and latent ", fmt_flux(get("latent_Q", "mean_signed")),
+    " W m⁻² on average. Together they are ",
+    sprintf("%.1f%%", 100 * (get("sensible_Q", "share_abs") + get("latent_Q", "share_abs"))),
+    " of the total flux magnitude.\n"
+  )
+}
+
+# Per-lake monthly panel: mean line + 10–90th percentile band of hourly values
+plot_lake_fluxes <- function(key) {
+  d <- dplyr::filter(flux_monthly, lake_key == key)
+  ggplot(d, aes(month, value, colour = flux, fill = flux)) +
+    geom_hline(yintercept = 0, colour = "grey60") +
+    geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.2, colour = NA, na.rm = TRUE) +
+    geom_line(linewidth = 0.8, na.rm = TRUE) +
+    geom_point(size = 1.4, na.rm = TRUE) +
+    scale_x_continuous(breaks = 1:12, labels = substr(month.abb, 1, 1)) +
+    scale_colour_manual(values = flux_cols, guide = "none") +
+    scale_fill_manual(values = flux_cols, guide = "none") +
+    facet_wrap(~ flux, nrow = 1, scales = "free_y") +
+    labs(x = NULL, y = "W m⁻²",
+         subtitle = "Monthly mean (line) and 10th–90th percentile of hourly values (band). Each panel has its own y-axis.") +
+    flux_theme
+}
+
+flux_tab <- function(key) {
+  cat("\n\n#### ", lake_name_of[[key]], "\n\n", sep = "")
+  cat(describe_fluxes(key), "\n\n")
+  print(plot_lake_fluxes(key))
+  cat("\n\n")
+}
+```
+
+```{r flux-tabs, results = "asis", fig.height = 3.2, fig.width = 12}
+for (key in lakes$lake_key) flux_tab(key)
+```
