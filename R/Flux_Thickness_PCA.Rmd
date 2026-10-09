@@ -12,6 +12,8 @@ params:
   # Months with fewer ice-covered days than this are dropped (freeze-up /
   # break-up months at the seasonal lakes, and partial first/last months).
   min_ice_days: 10
+  # Correlations with p >= sig_level are left blank in the correlation plot.
+  sig_level: 0.05
 ---
 
 ```{r setup, include = FALSE}
@@ -26,6 +28,7 @@ knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE,
 ```{r libraries}
 source(file.path(path, "R/functions/libraries.R"))
 source(file.path(path, "R/functions/functions.R"))
+pacman::p_load(ggcorrplot)   # correlation plot with p-value masking (p.mat)
 ```
 
 ```{r load-data}
@@ -136,23 +139,43 @@ monthly |>
 
 ### How the variables relate
 
-```{r correlations, fig.height = 5, fig.width = 7}
-cm <- cor(X)
-cm_long <- as.data.frame(as.table(cm)) |>
-  dplyr::mutate(Var1 = factor(Var1, levels = colnames(X)),
-                Var2 = factor(Var2, levels = rev(colnames(X))))
-ggplot(cm_long, aes(Var1, Var2, fill = Freq)) +
-  geom_tile(colour = "white", linewidth = 1) +
-  geom_text(aes(label = sprintf("%.2f", Freq),
-                colour = abs(Freq) > 0.6), size = 3.6, show.legend = FALSE) +
-  scale_colour_manual(values = c(`TRUE` = "white", `FALSE` = "grey15")) +
-  scale_fill_gradient2(low = "#2166AC", mid = "#F2F2F2", high = "#B2182B",
-                       limits = c(-1, 1), name = "r") +
-  labs(x = NULL, y = NULL, title = "Correlation between the PCA variables",
-       subtitle = "Pearson r across all lake-months") +
-  pca_theme +
-  theme(axis.text.x = element_text(angle = 30, hjust = 1), panel.grid = element_blank())
+```{r correlations, fig.height = 5.5, fig.width = 7}
+# Pearson correlations, with a p-value for every pair from cor.test()
+# (ggcorrplot::cor_pmat). Pairs with p >= params$sig_level are left blank.
+cm    <- cor(X)
+p_mat <- ggcorrplot::cor_pmat(X)
+
+ggcorrplot::ggcorrplot(
+  cm,
+  type          = "lower",
+  p.mat         = p_mat,
+  sig.level     = params$sig_level,
+  insig         = "blank",
+  lab           = TRUE,
+  lab_size      = 3.6,
+  colors        = c("#2166AC", "#F2F2F2", "#B2182B"),
+  outline.color = "white",
+  legend.title  = "r",
+  tl.srt        = 45,
+  ggtheme       = pca_theme
+) +
+  # Replace ggcorrplot's fill scale so non-significant cells are truly blank:
+  # depending on the ggcorrplot version they are drawn as NA or as r = 0, so
+  # both the NA colour and the midpoint are white. Significant cells keep labels.
+  scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B",
+                       limits = c(-1, 1), na.value = "white", name = "r") +
+  theme(panel.grid = element_blank()) +
+  labs(title = "Correlation between the PCA variables",
+       subtitle = sprintf("Pearson r across all lake-months; blank = not significant (p ≥ %s)",
+                          params$sig_level))
 ```
+
+`r sum(p_mat[lower.tri(p_mat)] < params$sig_level)` of `r sum(lower.tri(p_mat))`
+variable pairs are significant at p < `r params$sig_level`. With
+`r nrow(X)` lake-months, even |r| ≈ `r sprintf("%.2f", tanh(qnorm(1 - params$sig_level / 2) / sqrt(nrow(X) - 3)))`
+counts as significant, and consecutive months within a lake are not
+independent, so these p-values are optimistic. Treat the blank cells as
+"no evidence of a relationship" rather than the coloured ones as proof of one.
 
 ## PCA results
 

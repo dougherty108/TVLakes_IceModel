@@ -2,7 +2,7 @@
 
 Author: Charlie Dougherty
 
-Contact Information: cedougherty@wisc.edu, Charlie.Dougherty@colorado.edu, cdougherty2017@gmail.com
+Contact Information: Charlie.Dougherty@colorado.edu, cdougherty2017@gmail.com
 
 This repository contains the main ice thickness model script from the second chapter of my master's thesis. I am preparing this for publication, and will house all the data and analysis scripts here. 
 

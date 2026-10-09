@@ -38,6 +38,8 @@ lakes <- tibble::tribble(
   "GL4",     "R/GL4/01_GL4_ice_model.R",                "Data/model_outputs/GL4_2014_2025_output.csv",
   "LOC",     "R/LOC/01_LOC_ice_model.R",                "Data/model_outputs/LOC_2017_2024_output.csv"
 )
+# Daily ice temperature profiles, saved by the rerun-models chunk below
+lakes$profile_file <- sprintf("Data/model_outputs/%s_thermal_profile.rds", lakes$lake_key)
 ```
 
 ```{r rerun-models}
@@ -48,22 +50,49 @@ lakes <- tibble::tribble(
 # Knit > Knit with Parameters) to skip this and reuse the saved outputs.
 rerun_models <- if (exists("params")) isTRUE(params$rerun_models) else TRUE
 
-run_lake_model <- function(script) {
+# The output CSVs can't hold the ice temperature profiles (they are list
+# columns), so after each run save one profile per day to an .rds file in
+# long format: time, depth (m below the ice surface), temp_C.
+save_thermal_profile <- function(res, key) {
+  if (is.null(res) || !all(c("depth", "temperature") %in% names(res))) {
+    warning("No temperature profiles found for ", key, call. = FALSE)
+    return(invisible(NULL))
+  }
+  daily <- res[!duplicated(as.Date(res$time)), c("time", "depth", "temperature")]
+  ok <- purrr::map2_lgl(daily$depth, daily$temperature,
+                        ~ length(.x) > 1 && length(.x) == length(.y) && !all(is.na(.x)))
+  prof <- daily[ok, ] |>
+    tidyr::unnest(c(depth, temperature)) |>
+    dplyr::transmute(time,
+                     depth  = as.numeric(depth),
+                     temp_C = as.numeric(temperature) - 273.15)
+  saveRDS(prof, file.path(path, lakes$profile_file[lakes$lake_key == key]))
+}
+
+run_lake_model <- function(script, key) {
   old_wd <- setwd(path)                # 01_/00_ scripts use paths relative to the repo root
   on.exit(setwd(old_wd), add = TRUE)
-  t0 <- Sys.time()
+  t0  <- Sys.time()
+  env <- new.env(parent = globalenv()) # fresh environment per lake so runs can't leak into each other
   status <- tryCatch({
-    # Fresh environment per lake so objects from one run can't leak into the next
-    source(script, local = new.env(parent = globalenv()))
+    source(script, local = env)
     "Re-run"
   }, error = function(e) paste("FAILED:", conditionMessage(e)))
-  if (startsWith(status, "FAILED")) warning(script, " ", status, call. = FALSE)
+  if (startsWith(status, "FAILED")) {
+    warning(script, " ", status, call. = FALSE)
+  } else {
+    # each 01_ script leaves its model output in `results_<lake_key>`
+    res <- mget(paste0("results_", key), envir = env, ifnotfound = list(NULL))[[1]]
+    tryCatch(save_thermal_profile(res, key),
+             error = function(e) warning("Could not save thermal profile for ", key, ": ",
+                                         conditionMessage(e), call. = FALSE))
+  }
   tibble::tibble(status  = status,
                  minutes = round(as.numeric(difftime(Sys.time(), t0, units = "mins")), 1))
 }
 
 run_log <- if (rerun_models) {
-  purrr::map_dfr(lakes$model_script, run_lake_model)
+  purrr::map2_dfr(lakes$model_script, lakes$lake_key, run_lake_model)
 } else {
   tibble::tibble(status  = rep("Not re-run (saved output)", nrow(lakes)),
                  minutes = NA_real_)
@@ -179,6 +208,124 @@ plot_lake("GL4")
 ```{r loc}
 plot_lake("LOC")
 ```
+
+## Ice thermal profiles
+
+The model solves heat diffusion through the ice column on a `r CONSTANTS$dx` m
+grid. The top node is held at the air temperature and the bottom node at the
+freezing point (0 °C). These plots use one modelled profile per day, saved
+when the models are re-run at the top of this report. Depth is measured down
+from the ice surface.
+
+```{r profile-load}
+lake_names    <- purrr::map_chr(LAKE_CONFIGS, "lake_name")
+profile_paths <- file.path(path, lakes$profile_file)
+have_profile  <- file.exists(profile_paths)
+
+profiles <- purrr::map2_dfr(profile_paths[have_profile], lakes$lake_key[have_profile],
+                            ~ dplyr::mutate(readRDS(.x), lake_key = .y))
+
+# Profiles saved before the output CSV was last rewritten are out of date
+stale <- lakes$lake_key[have_profile][
+  file.mtime(profile_paths[have_profile]) <
+    file.mtime(file.path(path, lakes$output_file[have_profile])) - 60]
+
+if (nrow(profiles) > 0) {
+  dz <- CONSTANTS$dx
+  profiles <- profiles |>
+    dplyr::mutate(
+      lake   = factor(lake_names[lake_key], levels = lake_levels),
+      depth  = round(depth / dz) * dz,          # snap to the model grid
+      month  = lubridate::month(time),
+      region = ifelse(lake_key %in% c("GL4", "LOC"), "Colorado Rockies", "McMurdo Dry Valleys"),
+      # season in each lake's own hemisphere (Dry Valleys summer = Dec–Feb)
+      nh_month = ifelse(region == "McMurdo Dry Valleys", (month + 5) %% 12 + 1, month),
+      season = factor(c("Winter", "Winter", "Spring", "Spring", "Spring", "Summer",
+                        "Summer", "Summer", "Autumn", "Autumn", "Autumn", "Winter")[nh_month],
+                      levels = c("Winter", "Spring", "Summer", "Autumn"))
+    )
+}
+season_cols <- c(Winter = "#0072B2", Spring = "#009E73", Summer = "#E69F00", Autumn = "#CC79A7")
+```
+
+`r if (!all(have_profile)) sprintf("**No saved profiles for %s.** Knit once with <code>rerun_models: true</code> to create them.", paste(lake_names[lakes$lake_key[!have_profile]], collapse = ", ")) else ""`
+`r if (length(stale) > 0) sprintf("**The profiles for %s are older than their model output**, so they may not match the rest of this report. Re-knit with <code>rerun_models: true</code> to refresh them.", paste(lake_names[stale], collapse = ", ")) else ""`
+
+### Temperature through the ice column over time
+
+```{r profile-heatmap, fig.height = 15, eval = nrow(profiles) > 0}
+# Weekly means keep the plot readable over 7–11 years of daily profiles
+prof_week <- profiles |>
+  dplyr::mutate(week = as.Date(lubridate::floor_date(time, "week"))) |>
+  dplyr::group_by(lake, week, depth) |>
+  dplyr::summarise(temp_C = mean(temp_C), .groups = "drop")
+
+ggplot(prof_week, aes(week, depth, fill = temp_C)) +
+  geom_tile(width = 7, height = dz) +
+  scale_y_reverse(expand = c(0, 0)) +
+  scale_x_date(expand = c(0, 0), date_breaks = "1 year", date_labels = "%Y") +
+  scale_fill_viridis_c(option = "mako", name = "Ice\ntemperature\n(°C)") +
+  facet_wrap(~ lake, ncol = 1, scales = "free") +
+  labs(x = NULL, y = "Depth below ice surface (m)",
+       title = "Modelled ice temperature with depth through time",
+       subtitle = "Weekly mean of daily profiles. The bottom edge of the colour is the ice base; gaps are open water.") +
+  theme_minimal(base_size = 12) +
+  theme(strip.text = element_text(face = "bold", hjust = 0),
+        panel.grid = element_blank(),
+        legend.position = "right")
+```
+
+### Seasonal mean profiles
+
+```{r profile-seasonal, fig.height = 8, eval = nrow(profiles) > 0}
+# Mean profile per season, with the 10th–90th percentile of daily values.
+# Depths with fewer than 20 daily profiles in a season (the thickest, least
+# frequent ice) are dropped so the means aren't based on a handful of days.
+prof_season <- profiles |>
+  dplyr::group_by(lake, season, depth) |>
+  dplyr::summarise(lo = unname(quantile(temp_C, 0.10)),
+                   hi = unname(quantile(temp_C, 0.90)),
+                   temp_C = mean(temp_C), n = dplyr::n(), .groups = "drop") |>
+  dplyr::filter(n >= 20) |>
+  dplyr::arrange(lake, season, depth)
+
+ggplot(prof_season, aes(temp_C, depth, colour = season, fill = season)) +
+  geom_vline(xintercept = 0, colour = "grey70") +
+  geom_ribbon(aes(xmin = lo, xmax = hi), alpha = 0.15, colour = NA, orientation = "y") +
+  geom_path(linewidth = 0.9) +
+  scale_y_reverse() +
+  scale_colour_manual(values = season_cols, name = "Season\n(local hemisphere)") +
+  scale_fill_manual(values = season_cols, guide = "none") +
+  facet_wrap(~ lake, ncol = 3, scales = "free_y") +
+  labs(x = "Ice temperature (°C)", y = "Depth below ice surface (m)",
+       title = "Seasonal mean temperature profiles",
+       subtitle = "Line = seasonal mean; band = 10th–90th percentile of daily profiles.\nDry Valleys summer = Dec–Feb; Rockies summer = Jun–Aug (mostly open water).") +
+  theme_minimal(base_size = 12) +
+  theme(strip.text = element_text(face = "bold", hjust = 0),
+        panel.grid.minor = element_blank(),
+        legend.position = "top")
+```
+
+```{r profile-table, eval = nrow(profiles) > 0}
+profiles |>
+  dplyr::group_by(lake, season, time) |>
+  dplyr::summarise(t_mean = mean(temp_C), .groups = "drop") |>   # depth-averaged, per day
+  dplyr::group_by(Lake = lake, season) |>
+  dplyr::summarise(v = sprintf("%.1f", mean(t_mean)), .groups = "drop") |>
+  tidyr::pivot_wider(names_from = season, values_from = v, values_fill = "–") |>  # – = no ice that season
+  dplyr::left_join(
+    profiles |>
+      dplyr::group_by(Lake = lake) |>
+      dplyr::summarise(`Coldest (°C)` = sprintf("%.1f", min(temp_C)),
+                       `Max thickness on grid (m)` = sprintf("%.1f", max(depth))),
+    by = "Lake") |>
+  knitr::kable(caption = "Depth-averaged ice temperature by season (°C), coldest modelled temperature, and deepest grid node")
+```
+
+Because the top node is set to the air temperature, the near-surface part of
+these profiles follows the air temperature directly. Once the model solves for
+the ice surface temperature, the top of the profile will reflect the surface
+energy balance instead.
 
 ## Surface energy fluxes
 
