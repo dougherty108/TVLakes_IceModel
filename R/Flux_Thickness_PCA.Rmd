@@ -1,0 +1,339 @@
+---
+title: "PCA of Surface Energy Fluxes and Ice Thickness"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+params:
+  # What one row (observation) in the PCA is:
+  #   "year_month"     = one row per lake per calendar month of each year (e.g. ELB 2018-01)
+  #   "calendar_month" = one row per lake per month of the year, averaged over all years
+  aggregate: "year_month"
+  # Months with fewer ice-covered days than this are dropped (freeze-up /
+  # break-up months at the seasonal lakes, and partial first/last months).
+  min_ice_days: 10
+---
+
+```{r setup, include = FALSE}
+# Repository root. Every path below is built from it with file.path(), so the
+# chunks work both when knitting and when run one at a time in RStudio.
+path <- path.expand("~/Library/CloudStorage/OneDrive-UCB-O365 (9-15-26 4:10 PM)/Documents/R-Repositories/TVLakes_IceModel")
+if (!dir.exists(path)) stop("Repository folder not found: ", path)
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE,
+                      fig.width = 10, fig.height = 7)
+```
+
+```{r libraries}
+source(file.path(path, "R/functions/libraries.R"))
+source(file.path(path, "R/functions/functions.R"))
+```
+
+```{r load-data}
+# Saved model outputs (same files the Antarctica-to-Rockies report reads).
+# Re-knit Antarctica_to_Rockies_Comparison_Presentation.Rmd, or run the 01_
+# scripts, first if you want these to reflect the latest functions.R.
+lakes <- tibble::tribble(
+  ~lake_key, ~region,               ~output_file,
+  "WLB",     "McMurdo Dry Valleys", "Data/model_outputs/WLB_2017_2024_output.csv",
+  "ELB",     "McMurdo Dry Valleys", "Data/model_outputs/ELB_2017_2024_output.csv",
+  "LH",      "McMurdo Dry Valleys", "Data/model_outputs/LH_2017_2024_output.csv",
+  "LF",      "McMurdo Dry Valleys", "Data/model_outputs/LF_2017_2024_output.csv",
+  "GL4",     "Colorado Rockies",    "Data/model_outputs/GL4_2014_2025_output.csv",
+  "LOC",     "Colorado Rockies",    "Data/model_outputs/LOC_2017_2024_output.csv"
+) |>
+  dplyr::mutate(lake_name = purrr::map_chr(lake_key, ~ LAKE_CONFIGS[[.x]]$lake_name))
+
+results <- lakes$output_file |>
+  purrr::map(~ readr::read_csv(file.path(path, .x), show_col_types = FALSE)) |>
+  purrr::set_names(lakes$lake_key)
+
+output_written <- file.mtime(file.path(path, lakes$output_file))
+```
+
+```{r build-table}
+# PCA variables: monthly mean of each flux type, plus mean ice thickness.
+# Only ice-covered hours are used (open water at GL4 / The Loch is excluded),
+# and the conductive flux is negated so every flux carries the sign it has in
+# the surface energy balance (positive = energy into the ice surface).
+pca_vars <- c(SW_abs       = "Absorbed SW",
+              LW_net       = "Net LW",
+              sensible_Q   = "Sensible heat",
+              latent_Q     = "Latent heat",
+              conductive_Q = "Conductive (−Qc)",
+              thickness    = "Ice thickness")
+
+hourly <- purrr::imap_dfr(results, function(res, key) {
+  if (!"phase" %in% names(res)) res$phase <- "ice"     # perennial lakes: always ice
+  res |>
+    dplyr::filter(phase == "ice") |>
+    dplyr::mutate(conductive_Q = -conductive_Q,
+                  lake_key     = key,
+                  year         = lubridate::year(time),
+                  month        = lubridate::month(time)) |>
+    dplyr::select(lake_key, time, year, month, dplyr::all_of(names(pca_vars)))
+})
+
+group_cols <- if (params$aggregate == "calendar_month") c("lake_key", "month") else
+  c("lake_key", "year", "month")
+
+monthly <- hourly |>
+  dplyr::group_by(dplyr::across(dplyr::all_of(group_cols))) |>
+  dplyr::summarise(n_hours = dplyr::n(),
+                   dplyr::across(dplyr::all_of(names(pca_vars)), ~ mean(.x, na.rm = TRUE)),
+                   .groups = "drop") |>
+  dplyr::filter(n_hours >= 24 * params$min_ice_days) |>
+  tidyr::drop_na(dplyr::all_of(names(pca_vars))) |>
+  dplyr::left_join(lakes |> dplyr::select(lake_key, region, lake_name), by = "lake_key") |>
+  dplyr::mutate(
+    lake   = factor(lake_name, levels = lakes$lake_name),
+    region = factor(region, levels = c("McMurdo Dry Valleys", "Colorado Rockies")),
+    # Season relative to each lake's own hemisphere (Dry Valleys summer = DJF)
+    nh_month = ifelse(region == "McMurdo Dry Valleys", (month + 5) %% 12 + 1, month),
+    season = factor(c("Winter", "Winter", "Spring", "Spring", "Spring", "Summer",
+                      "Summer", "Summer", "Autumn", "Autumn", "Autumn", "Winter")[nh_month],
+                    levels = c("Winter", "Spring", "Summer", "Autumn"))
+  )
+
+# Drop any variable with zero variance (it carries no information and breaks scaling)
+keep_vars <- names(pca_vars)[purrr::map_dbl(monthly[names(pca_vars)], sd) > 0]
+dropped   <- setdiff(names(pca_vars), keep_vars)
+X <- as.matrix(monthly[keep_vars])
+colnames(X) <- pca_vars[keep_vars]
+
+lake_cols   <- setNames(c("#0072B2", "#56B4E9", "#009E73", "#CC79A7", "#E69F00", "#D55E00"),
+                        lakes$lake_name)
+season_cols <- c(Winter = "#0072B2", Spring = "#009E73", Summer = "#E69F00", Autumn = "#CC79A7")
+region_shapes <- c("McMurdo Dry Valleys" = 16, "Colorado Rockies" = 17)
+
+pca_theme <- theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(),
+        strip.text       = element_text(face = "bold", hjust = 0),
+        legend.position  = "right")
+```
+
+## Data
+
+Each observation is **`r if (params$aggregate == "calendar_month") "one lake in one calendar month, averaged over all model years" else "one lake in one month of one year"`**.
+The variables are the monthly means of each surface flux type (W m⁻²) and the
+monthly mean ice thickness (m). Only ice-covered hours are used, and months
+with fewer than `r params$min_ice_days` ice-covered days are dropped. That
+leaves **`r nrow(monthly)` observations** across `r dplyr::n_distinct(monthly$lake)` lakes.
+`r if (length(dropped) > 0) paste0("Dropped for having no variation: ", paste(pca_vars[dropped], collapse = ", "), ".") else ""`
+Every variable is centred and scaled to unit variance before the PCA. Without
+that, the large radiative fluxes and the metre-scale thickness would dominate
+just because of their units.
+
+```{r data-table}
+monthly |>
+  dplyr::count(region, lake, name = "Months") |>
+  dplyr::left_join(
+    tibble::tibble(lake = factor(lakes$lake_name, levels = lakes$lake_name),
+                   `Output last written` = format(output_written, "%Y-%m-%d %H:%M")),
+    by = "lake") |>
+  dplyr::rename(Region = region, Lake = lake) |>
+  knitr::kable(caption = "Observations per lake")
+```
+
+### How the variables relate
+
+```{r correlations, fig.height = 5, fig.width = 7}
+cm <- cor(X)
+cm_long <- as.data.frame(as.table(cm)) |>
+  dplyr::mutate(Var1 = factor(Var1, levels = colnames(X)),
+                Var2 = factor(Var2, levels = rev(colnames(X))))
+ggplot(cm_long, aes(Var1, Var2, fill = Freq)) +
+  geom_tile(colour = "white", linewidth = 1) +
+  geom_text(aes(label = sprintf("%.2f", Freq),
+                colour = abs(Freq) > 0.6), size = 3.6, show.legend = FALSE) +
+  scale_colour_manual(values = c(`TRUE` = "white", `FALSE` = "grey15")) +
+  scale_fill_gradient2(low = "#2166AC", mid = "#F2F2F2", high = "#B2182B",
+                       limits = c(-1, 1), name = "r") +
+  labs(x = NULL, y = NULL, title = "Correlation between the PCA variables",
+       subtitle = "Pearson r across all lake-months") +
+  pca_theme +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1), panel.grid = element_blank())
+```
+
+## PCA results
+
+```{r pca}
+pca <- prcomp(X, center = TRUE, scale. = TRUE)
+ve  <- 100 * pca$sdev^2 / sum(pca$sdev^2)
+n_pc <- length(ve)
+
+scores <- dplyr::bind_cols(
+  monthly |> dplyr::select(lake, lake_key, region, season, month, dplyr::any_of("year")),
+  as.data.frame(pca$x)
+)
+loadings <- as.data.frame(pca$rotation) |>
+  tibble::rownames_to_column("variable") |>
+  dplyr::mutate(variable = factor(variable, levels = colnames(X)))
+```
+
+### Variance explained
+
+```{r scree, fig.height = 4, fig.width = 7}
+scree <- tibble::tibble(pc = factor(paste0("PC", seq_len(n_pc)), levels = paste0("PC", seq_len(n_pc))),
+                        ve = ve, cum = cumsum(ve))
+ggplot(scree, aes(pc, ve)) +
+  geom_col(fill = "#0072B2", width = 0.6) +
+  geom_text(aes(label = sprintf("%.0f%%", ve)), vjust = -0.4, size = 3.6) +
+  geom_line(aes(y = cum, group = 1), colour = "grey40") +
+  geom_point(aes(y = cum), colour = "grey40", size = 2) +
+  scale_y_continuous(limits = c(0, 105), expand = c(0, 0)) +
+  labs(x = NULL, y = "Variance explained (%)",
+       title = "Variance explained by each principal component",
+       subtitle = "Bars = each PC; grey line = cumulative") +
+  pca_theme
+```
+
+PC1 explains `r sprintf("%.0f%%", ve[1])` of the variance and PC2 explains
+`r sprintf("%.0f%%", ve[2])`. Together the first two components capture
+`r sprintf("%.0f%%", sum(ve[1:2]))`, and the first three capture
+`r sprintf("%.0f%%", sum(ve[1:min(3, n_pc)]))`.
+
+### Loadings
+
+```{r loadings-heatmap, fig.height = 4.5, fig.width = 8}
+n_show <- min(4, n_pc)
+ld_long <- loadings |>
+  tidyr::pivot_longer(dplyr::all_of(paste0("PC", seq_len(n_show))),
+                      names_to = "pc", values_to = "loading") |>
+  dplyr::mutate(pc = factor(sprintf("%s (%.0f%%)", pc, ve[as.integer(sub("PC", "", pc))]),
+                            levels = sprintf("PC%d (%.0f%%)", seq_len(n_show), ve[seq_len(n_show)])),
+                variable = factor(variable, levels = rev(colnames(X))))
+ggplot(ld_long, aes(pc, variable, fill = loading)) +
+  geom_tile(colour = "white", linewidth = 1) +
+  geom_text(aes(label = sprintf("%+.2f", loading), colour = abs(loading) > 0.5),
+            size = 3.8, show.legend = FALSE) +
+  scale_colour_manual(values = c(`TRUE` = "white", `FALSE` = "grey15")) +
+  scale_fill_gradient2(low = "#2166AC", mid = "#F2F2F2", high = "#B2182B",
+                       limits = c(-1, 1), name = "Loading") +
+  labs(x = NULL, y = NULL, title = "Variable loadings on each principal component",
+       subtitle = "Signs are arbitrary within a PC; what matters is which variables share a sign") +
+  pca_theme + theme(panel.grid = element_blank())
+```
+
+```{r pc-describe}
+describe_pc <- function(k, cut = 0.35) {
+  l   <- setNames(pca$rotation[, k], rownames(pca$rotation))
+  pos <- names(sort(l[l >=  cut], decreasing = TRUE))
+  neg <- names(sort(l[l <= -cut]))
+  lake_means <- scores |>
+    dplyr::group_by(lake) |>
+    dplyr::summarise(m = mean(.data[[paste0("PC", k)]]), .groups = "drop") |>
+    dplyr::arrange(m)
+  parts <- c(if (length(pos)) paste("high", paste(pos, collapse = ", ")),
+             if (length(neg)) paste("low",  paste(neg, collapse = ", ")))
+  meaning <- if (length(parts)) paste(parts, collapse = " and ") else
+    "no single variable (all loadings are small)"
+  paste0(
+    "- **PC", k, " (", sprintf("%.0f%%", ve[k]), ")**: high scores mean ", meaning, ". ",
+    "Lakes with the highest mean score: ", paste(rev(tail(as.character(lake_means$lake), 2)), collapse = ", "),
+    "; lowest: ", paste(head(as.character(lake_means$lake), 2), collapse = ", "), "."
+  )
+}
+```
+
+`r paste(purrr::map_chr(seq_len(min(3, n_pc)), describe_pc), collapse = "\n")`
+
+The descriptions above list variables with |loading| ≥ 0.35.
+
+### Biplots
+
+```{r biplot-fn}
+biplot_pcs <- function(a = 1, b = 2) {
+  pa <- paste0("PC", a); pb <- paste0("PC", b)
+  # Scale the loading arrows so they fill most of the score cloud
+  k <- 0.85 * max(abs(c(scores[[pa]], scores[[pb]]))) /
+    max(sqrt(loadings[[pa]]^2 + loadings[[pb]]^2))
+  arrows <- loadings |> dplyr::mutate(x = k * .data[[pa]], y = k * .data[[pb]])
+  centroids <- scores |>
+    dplyr::group_by(lake, region) |>
+    dplyr::summarise(x = mean(.data[[pa]]), y = mean(.data[[pb]]), .groups = "drop")
+
+  ggplot(scores, aes(.data[[pa]], .data[[pb]])) +
+    geom_hline(yintercept = 0, colour = "grey80") +
+    geom_vline(xintercept = 0, colour = "grey80") +
+    geom_point(aes(colour = lake, shape = region), size = 2, alpha = 0.55) +
+    stat_ellipse(aes(colour = lake, group = lake), level = 0.68, linewidth = 0.7,
+                 show.legend = FALSE) +
+    geom_segment(data = arrows, aes(x = 0, y = 0, xend = x, yend = y),
+                 inherit.aes = FALSE, colour = "grey20", linewidth = 0.6,
+                 arrow = arrow(length = unit(2.5, "mm"))) +
+    ggrepel::geom_label_repel(data = arrows, aes(x, y, label = variable),
+                              inherit.aes = FALSE, size = 3.4, colour = "grey10",
+                              fill = scales::alpha("white", 0.85), label.size = 0,
+                              seed = 1, min.segment.length = 0.3, max.overlaps = Inf) +
+    ggrepel::geom_text_repel(data = centroids, aes(x, y, label = lake, colour = lake),
+                             inherit.aes = FALSE, fontface = "bold", size = 3.6,
+                             seed = 2, show.legend = FALSE, bg.colour = "white", bg.r = 0.15,
+                             max.overlaps = Inf) +
+    scale_colour_manual(values = lake_cols, name = NULL) +
+    scale_shape_manual(values = region_shapes, name = NULL) +
+    coord_equal() +
+    labs(x = sprintf("%s (%.0f%% of variance)", pa, ve[a]),
+         y = sprintf("%s (%.0f%% of variance)", pb, ve[b]),
+         title = sprintf("%s vs %s", pa, pb),
+         subtitle = "Points = lake-months; ellipses = 68% of each lake's months; arrows = variable loadings") +
+    pca_theme
+}
+```
+
+```{r biplot-12, fig.height = 8}
+biplot_pcs(1, 2)
+```
+
+```{r biplot-23, fig.height = 8, eval = n_pc >= 3}
+biplot_pcs(2, 3)
+```
+
+### Seasonal paths through PC space
+
+```{r season-facets, fig.height = 8}
+ggplot(scores, aes(PC1, PC2)) +
+  geom_hline(yintercept = 0, colour = "grey85") +
+  geom_vline(xintercept = 0, colour = "grey85") +
+  # all lakes in grey for context
+  geom_point(data = dplyr::select(scores, -lake), colour = "grey88", size = 1.2) +
+  geom_point(aes(colour = season), size = 2, alpha = 0.85) +
+  scale_colour_manual(values = season_cols, name = "Season\n(local hemisphere)") +
+  facet_wrap(~ lake, ncol = 3) +
+  coord_equal() +
+  labs(x = sprintf("PC1 (%.0f%%)", ve[1]), y = sprintf("PC2 (%.0f%%)", ve[2]),
+       title = "Where each lake sits in PC1–PC2 space, by season",
+       subtitle = "Grey = all other lakes. Seasons follow each lake's hemisphere (Dry Valleys summer = Dec–Feb).") +
+  pca_theme
+```
+
+### Lake mean scores
+
+```{r score-table}
+scores |>
+  dplyr::group_by(Region = region, Lake = lake) |>
+  dplyr::summarise(dplyr::across(dplyr::all_of(paste0("PC", seq_len(min(3, n_pc)))),
+                                 ~ sprintf("%+.2f ± %.2f", mean(.x), sd(.x))),
+                   .groups = "drop") |>
+  knitr::kable(caption = "Mean ± SD of each lake's PC scores")
+```
+
+```{r loading-table}
+loadings |>
+  dplyr::select(Variable = variable, dplyr::all_of(paste0("PC", seq_len(min(4, n_pc))))) |>
+  dplyr::mutate(dplyr::across(-Variable, ~ sprintf("%+.3f", .x))) |>
+  knitr::kable(caption = "Loadings (eigenvectors)")
+```
+
+## Notes
+
+- **The results depend on the model version.** The fluxes come from the saved
+  model outputs, so the PCA reflects whatever version of `functions.R` produced
+  them (shown in the "Output last written" column above). The turbulent fluxes
+  in particular will change once the surface-temperature fix is in.
+- **Thickness separates the regions.** Perennial Dry Valley ice is roughly
+  3–5 m thick and seasonal Rockies ice is under about 1 m, so thickness alone
+  pulls the two regions apart. To see how flux patterns differ apart from
+  thickness, remove `thickness` from `pca_vars`.
+- **Monthly observations are not independent.** Months within a lake are
+  autocorrelated, so the PCA is for describing and comparing lakes, not for
+  significance tests.
