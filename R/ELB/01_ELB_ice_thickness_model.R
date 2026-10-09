@@ -14,13 +14,13 @@
 # sediment maps over the McMurdo Dry Valleys Lakes using Landsat 8 data.
 #
 # This driver is now a thin wrapper around the lake-agnostic functions in
-# R/TEST_Optimizations/functions.R: prepare_model_input(), run_ice_model(),
+# R/functions/functions.R: prepare_model_input(), run_ice_model(),
 # lake_constants(), and plot_ice_model(). All ELB-specific choices live in
 # LAKE_CONFIGS$ELB and were already applied when `inputs` was built in
 # 00_ELB_data_preparation.R.
 
-source("R/TEST_Optimizations/libraries.R")
-source("R/TEST_Optimizations/functions.R")
+source("R/functions/libraries.R")
+source("R/functions/functions.R")
 
 lake_key <- "ELB"
 

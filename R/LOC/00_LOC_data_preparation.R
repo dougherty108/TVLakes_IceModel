@@ -12,8 +12,8 @@
 # MCM-LTER date_time / z_water_m format, time_model, params), so the 01_
 # script follows the identical workflow.
 
-source("R/TEST_Optimizations/libraries.R")
-source("R/TEST_Optimizations/functions.R")
+source("R/functions/libraries.R")
+source("R/functions/functions.R")
 
 lake_key <- "LOC"
 

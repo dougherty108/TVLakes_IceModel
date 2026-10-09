@@ -9,8 +9,8 @@
 # To run a different lake, change `lake_key` and the stations/files loaded
 # below — the modeling code in functions.R does not need to change.
 
-source("R/TEST_Optimizations/libraries.R")
-source("R/TEST_Optimizations/functions.R")
+source("R/functions/libraries.R")
+source("R/functions/functions.R")
 
 lake_key <- "ELB"
 

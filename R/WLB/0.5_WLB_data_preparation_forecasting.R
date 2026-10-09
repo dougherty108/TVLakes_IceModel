@@ -25,11 +25,11 @@
 #
 # This driver is a thin wrapper around the lake-agnostic
 # generate_climatological_climate() function in
-# R/TEST_Optimizations/functions.R. All the climatology-building / tiling
+# R/functions/functions.R. All the climatology-building / tiling
 # machinery lives there; only WLB-specific choices are made here.
 
-source("R/TEST_Optimizations/libraries.R")
-source("R/TEST_Optimizations/functions.R")
+source("R/functions/libraries.R")
+source("R/functions/functions.R")
 
 lake_key <- "WLB"
 

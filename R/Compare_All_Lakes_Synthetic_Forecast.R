@@ -28,11 +28,11 @@
 # Adjust `horizon_year`, `warming_rate`, and `climatology_start` below to
 # explore different "what if" climate scenarios across all four lakes at
 # once. This is a thin orchestration layer over the lake-agnostic functions
-# in R/TEST_Optimizations/functions.R — no lake-specific modeling code lives
+# in R/functions/functions.R — no lake-specific modeling code lives
 # here.
 
-source("R/TEST_Optimizations/libraries.R")
-source("R/TEST_Optimizations/functions.R")
+source("R/functions/libraries.R")
+source("R/functions/functions.R")
 
 ###################### Scenario assumptions (applied to every lake) ######################
 # How far forward (calendar year) to tile each lake's climatology out to.
