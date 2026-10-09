@@ -4,6 +4,11 @@ output:
   html_document:
     toc: true
     toc_float: true
+params:
+  # TRUE  = re-run every lake's 01_ model script (and its 00_ data prep) before
+  #         building the report, so changes to R/functions/ are picked up.
+  # FALSE = skip the model runs and use the CSVs already in Data/model_outputs/.
+  rerun_models: true
 ---
 
 ```{r setup, include = FALSE}
@@ -21,18 +26,53 @@ source(file.path(path, "R/functions/libraries.R"))
 source(file.path(path, "R/functions/functions.R"))
 ```
 
-```{r load-data}
-# One row per lake: which saved model output to read. Add/remove lakes here.
+```{r lake-list}
+# One row per lake: the model script that (re)creates its output, and the
+# saved output this report reads. Add/remove lakes here.
 lakes <- tibble::tribble(
-  ~lake_key, ~output_file,
-  "WLB",     "Data/model_outputs/WLB_2017_2024_output.csv",
-  "ELB",     "Data/model_outputs/ELB_2017_2024_output.csv",
-  "LH",      "Data/model_outputs/LH_2017_2024_output.csv",
-  "LF",      "Data/model_outputs/LF_2017_2024_output.csv",
-  "GL4",     "Data/model_outputs/GL4_2014_2025_output.csv",
-  "LOC",     "Data/model_outputs/LOC_2017_2024_output.csv"
+  ~lake_key, ~model_script,                             ~output_file,
+  "WLB",     "R/WLB/01_WLB_ice_thickness_model.R",      "Data/model_outputs/WLB_2017_2024_output.csv",
+  "ELB",     "R/ELB/01_ELB_ice_thickness_model.R",      "Data/model_outputs/ELB_2017_2024_output.csv",
+  "LH",      "R/LH/01_LH_ice_thickness_model.R",        "Data/model_outputs/LH_2017_2024_output.csv",
+  "LF",      "R/LF/01_LF_ice_thickness_model.R",        "Data/model_outputs/LF_2017_2024_output.csv",
+  "GL4",     "R/GL4/01_GL4_ice_model.R",                "Data/model_outputs/GL4_2014_2025_output.csv",
+  "LOC",     "R/LOC/01_LOC_ice_model.R",                "Data/model_outputs/LOC_2017_2024_output.csv"
 )
+```
 
+```{r rerun-models}
+# Re-run every lake's ice-thickness model so the report always reflects the
+# current R/functions/functions.R and CONSTANTS / LAKE_CONFIGS. Each 01_ script
+# sources its own 00_ data-prep script, runs the model, and overwrites its CSV
+# in Data/model_outputs/. Set `rerun_models: false` in the YAML header (or
+# Knit > Knit with Parameters) to skip this and reuse the saved outputs.
+rerun_models <- if (exists("params")) isTRUE(params$rerun_models) else TRUE
+
+run_lake_model <- function(script) {
+  old_wd <- setwd(path)                # 01_/00_ scripts use paths relative to the repo root
+  on.exit(setwd(old_wd), add = TRUE)
+  t0 <- Sys.time()
+  status <- tryCatch({
+    # Fresh environment per lake so objects from one run can't leak into the next
+    source(script, local = new.env(parent = globalenv()))
+    "Re-run"
+  }, error = function(e) paste("FAILED:", conditionMessage(e)))
+  if (startsWith(status, "FAILED")) warning(script, " ", status, call. = FALSE)
+  tibble::tibble(status  = status,
+                 minutes = round(as.numeric(difftime(Sys.time(), t0, units = "mins")), 1))
+}
+
+run_log <- if (rerun_models) {
+  purrr::map_dfr(lakes$model_script, run_lake_model)
+} else {
+  tibble::tibble(status  = rep("Not re-run (saved output)", nrow(lakes)),
+                 minutes = NA_real_)
+}
+run_log <- dplyr::bind_cols(lakes, run_log) |>
+  dplyr::mutate(output_written = file.mtime(file.path(path, output_file)))
+```
+
+```{r load-data}
 # Saved model output for each lake (named list: results$ELB, results$GL4, ...)
 results <- lakes$output_file |>
   purrr::map(~ readr::read_csv(file.path(path, .x), show_col_types = FALSE)) |>
@@ -64,6 +104,21 @@ plot_lake <- function(key) {
   )
 }
 ```
+
+## Model runs
+
+```{r run-status}
+n_failed <- sum(startsWith(run_log$status, "FAILED"))
+run_log |>
+  dplyr::transmute(Lake = purrr::map_chr(lake_key, ~ LAKE_CONFIGS[[.x]]$lake_name),
+                   Script = model_script,
+                   Status = status,
+                   `Run time (min)` = minutes,
+                   `Output last written` = format(output_written, "%Y-%m-%d %H:%M")) |>
+  knitr::kable()
+```
+
+`r if (n_failed > 0) sprintf("**Warning: %d model run(s) failed. Those lakes are shown using their previously saved output (see the table above).**", n_failed) else ""`
 
 ## Ice thickness: all lakes
 

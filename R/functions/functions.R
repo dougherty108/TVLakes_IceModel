@@ -110,7 +110,7 @@ LAKE_CONFIGS <- list(
   WLB = list(
     lake_name        = "West Lake Bonney",
     L_initial        = 3.39,   # ice-to-ice thickness on 2016-12-17
-    Chi              = 0.30, #0.30,
+    Chi              = 0.25, #0.30,
     albedo_multiplier = 1.00,  # no adjustment
     start_filter    = as.POSIXct("2016-12-23 00:00:00"),
     n_years         = 6.95,
@@ -127,7 +127,7 @@ LAKE_CONFIGS <- list(
   LH = list(
     lake_name        = "Lake Hoare",
     L_initial        = 3.50,   # ice-to-ice thickness on 2016-12-17
-    Chi              = 0.30,
+    Chi              = 0.35,
     albedo_multiplier = 1.00,  # no adjustment
     start_filter    = as.POSIXct("2016-12-14 00:00:00"),
     n_years         = 6.95,
@@ -144,7 +144,7 @@ LAKE_CONFIGS <- list(
   LF = list(
     lake_name        = "Lake Fryxell",
     L_initial        = 4.60,   # ice-to-ice thickness on 2016-12-17
-    Chi              = 0.30,
+    Chi              = 0.35,
     albedo_multiplier = 1.00,  # leave LF as-is
     start_filter    = as.POSIXct("2016-12-11 00:00:00"),
 
@@ -163,7 +163,7 @@ LAKE_CONFIGS <- list(
     lake_name         = "Green Lake 4",
     L_initial         = 0.10,   # = dx; start ice-covered (1 Jan is mid-winter) on a valid 2-node grid
     L_nucleation      = 0.10,   # = dx; new ice forms at one grid step so the profile can grow
-    Chi               = 0.30,
+    Chi               = 0.25,
     albedo_multiplier = 1.00,
     albedo_ice        = 0.85,   # constant dummy albedo — no AlbedoModel.csv for GL4
     seasonally_frozen = TRUE,
