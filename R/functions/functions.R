@@ -1325,7 +1325,7 @@ run_ice_model <- function(
       LW_net <- LWR_in - LWR_out
 
       # -- Sensible heat flux ----------------------------------------------
-      rho_air <- (press * Ma) * 0.1 / (R * T_air)
+      rho_air <- (press * Ma) / (R * T_air)   # kg m^-3; press is in Pa (removed stray *0.1, 2026-10-09)
       Qh      <- rho_air * Ca * Ch * delta_T * wind
 
       # -- Latent heat flux ------------------------------------------------
@@ -1335,12 +1335,12 @@ run_ice_model <- function(
         A <- 6.1115; B <- 22.452; C <- 272.55; xLatent <- xLs
       }
       T_ref       <- T_air - Tf
-      ea          <- ((rh / 100) * A * exp((B * T_ref) / (C + T_ref))) / 100
+      ea          <- ((rh / 100) * A * exp((B * T_ref) / (C + T_ref))) * 100   # hPa -> Pa (was / 100, 2026-10-09)
       rho_air_lat <- press * Ma / (R * T_air) * (1 + (epsilon - 1) * (ea / press))
       es0         <- if (length(newT) > 0 && newT[1] >= Tf) {
-        (A * exp(0)) / 100
+        (A * exp(0)) * 100                                  # hPa -> Pa
       } else {
-        (A * exp((B * T_ref) / (C + T_ref))) / 100
+        (A * exp((B * T_ref) / (C + T_ref))) * 100          # hPa -> Pa
       }
       Ql <- rho_air_lat * xLatent * Ce * (0.622 / press) * (ea - es0) * wind
 
@@ -1421,17 +1421,17 @@ run_ice_model <- function(
       # Sensible heat (bulk aerodynamic). Positive = heat INTO the water, so the
       # gradient is air minus water: cold air over warmer water cools the lake.
       # (Was T_water - T_air, which warmed the lake in winter so it never refroze.)
-      rho_air     <- (press * Ma) * 0.1 / (R * T_air)
+      rho_air     <- (press * Ma) / (R * T_air)   # kg m^-3; press in Pa (removed stray *0.1, 2026-10-09)
       dT_bulk     <- T_air - T_water
       Qh          <- rho_air * Ca * Ch * dT_bulk * wind
 
       # Latent heat from open water surface
       A <- 6.1121; B <- 17.502; C <- 240.97; xLatent <- xLv
       T_ref       <- T_air - Tf
-      ea          <- ((rh / 100) * A * exp((B * T_ref) / (C + T_ref))) / 100
+      ea          <- ((rh / 100) * A * exp((B * T_ref) / (C + T_ref))) * 100   # hPa -> Pa (was / 100, 2026-10-09)
       rho_air_lat <- press * Ma / (R * T_air) * (1 + (epsilon - 1) * (ea / press))
       T_ref_w     <- T_water - Tf
-      es0         <- (A * exp((B * T_ref_w) / (C + T_ref_w))) / 100
+      es0         <- (A * exp((B * T_ref_w) / (C + T_ref_w))) * 100   # hPa -> Pa (was / 100, 2026-10-09)
       Ql          <- rho_air_lat * xLatent * Ce * (0.622 / press) * (ea - es0) * wind
 
       # No conductive flux in open-water phase
