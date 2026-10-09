@@ -59,7 +59,7 @@ plot_ice_model(
 )
 
 # write output to model_outputs folder
-#write_csv(results_GL4, "Data/model_outputs/GL4_2014_2025_output.csv")
+write_csv(results_GL4, "Data/model_outputs/GL4_2014_2025_output.csv")
 
 # quick plot to compare modeled ice thickness to measured ice thickness
 results_GL4_v2 = results_GL4 |> 
