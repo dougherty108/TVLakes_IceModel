@@ -15,7 +15,7 @@ params:
 # Repository root. Every path below is built from it with file.path(), so the
 # chunks work both when knitting and when run one at a time in RStudio
 # (which runs chunks from this Rmd's folder, R/, not the repo root).
-path <- path.expand("~/Library/CloudStorage/OneDrive-UCB-O365 (9-15-26 4:10 PM)/Documents/R-Repositories/TVLakes_IceModel")
+path <- path.expand("~/Library/CloudStorage/OneDrive-UCB-O365/Documents/R-Repositories/TVLakes_IceModel")
 if (!dir.exists(path)) stop("Repository folder not found: ", path)
 knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE,
                       fig.width = 10, fig.height = 7)
@@ -40,6 +40,8 @@ lakes <- tibble::tribble(
 )
 # Daily ice temperature profiles, saved by the rerun-models chunk below
 lakes$profile_file <- sprintf("Data/model_outputs/%s_thermal_profile.rds", lakes$lake_key)
+# Daily means of each lake's model input time series, also saved by rerun-models
+lakes$forcing_file <- sprintf("Data/model_outputs/%s_forcing_daily.rds", lakes$lake_key)
 ```
 
 ```{r rerun-models}
@@ -69,6 +71,26 @@ save_thermal_profile <- function(res, key) {
   saveRDS(prof, file.path(path, lakes$profile_file[lakes$lake_key == key]))
 }
 
+# Same for the model's input time series (the prepared ts_ready_<lake_key>
+# each 01_ script passes to run_ice_model), saved as daily means.
+save_forcing <- function(env, key) {
+  ts <- mget(paste0("ts_ready_", key), envir = env, ifnotfound = list(NULL))[[1]]
+  if (is.null(ts) && exists("inputs", envir = env, inherits = FALSE))
+    ts <- get("inputs", envir = env)$time_series
+  if (is.null(ts)) {
+    warning("No input time series found for ", key, call. = FALSE)
+    return(invisible(NULL))
+  }
+  vars <- intersect(c("T_air", "SW_in", "LWR_in", "LWR_out", "wind",
+                      "relative_humidity", "pressure", "albedo", "snow_depth"), names(ts))
+  daily <- ts |>
+    dplyr::mutate(day = as.Date(time)) |>
+    dplyr::group_by(day) |>
+    dplyr::summarise(dplyr::across(dplyr::all_of(vars), ~ mean(.x, na.rm = TRUE)),
+                     .groups = "drop")
+  saveRDS(daily, file.path(path, lakes$forcing_file[lakes$lake_key == key]))
+}
+
 run_lake_model <- function(script, key) {
   old_wd <- setwd(path)                # 01_/00_ scripts use paths relative to the repo root
   on.exit(setwd(old_wd), add = TRUE)
@@ -85,6 +107,9 @@ run_lake_model <- function(script, key) {
     res <- mget(paste0("results_", key), envir = env, ifnotfound = list(NULL))[[1]]
     tryCatch(save_thermal_profile(res, key),
              error = function(e) warning("Could not save thermal profile for ", key, ": ",
+                                         conditionMessage(e), call. = FALSE))
+    tryCatch(save_forcing(env, key),
+             error = function(e) warning("Could not save input time series for ", key, ": ",
                                          conditionMessage(e), call. = FALSE))
   }
   tibble::tibble(status  = status,
@@ -175,6 +200,294 @@ ggplot(model_daily, aes(day, thickness)) +
   theme_minimal(base_size = 12) +
   theme(strip.text = element_text(face = "bold", hjust = 0),
         panel.grid.minor = element_blank())
+```
+
+## Ice thickness measurement types
+
+The MCM LTER ice-thickness record has two measurements from each hole:
+
+- **Depth to water** (`z_water_m`): from the ice surface down to the water
+  level in the hole. The model is initialised and compared against this.
+- **Total ice thickness** (`z_ice_m`): from the ice surface to the base of the
+  ice.
+
+The difference between them is the **freeboard**: the ice standing above the
+water level. To compare the model with total thickness, each lake's mean
+freeboard over the model period is added to the model. Holes are filtered the
+same way as for the model fit (Inside holes only at West Lake Bonney, "O"
+holes at Lake Fryxell).
+
+```{r meas-prep}
+meas_keys <- intersect(c("WLB", "ELB", "LH", "LF"), names(results))
+
+ice_raw <- readr::read_csv(file.path(path, "Data/mcmlter-lake-ice_thickness-20250218_0_2025.csv"),
+                           show_col_types = FALSE)
+
+meas <- purrr::map_dfr(meas_keys, function(key) {
+  cfg <- LAKE_CONFIGS[[key]]
+  d <- dplyr::filter(ice_raw, location_name == cfg$lake_name)
+  if (is.function(cfg$ice_loc_filter)) d <- cfg$ice_loc_filter(d)
+  rng <- range(as.Date(results[[key]]$time))
+  d |>
+    dplyr::transmute(lake_key = key,
+                     day      = as.Date(lubridate::parse_date_time(date_time, c("mdy HM", "mdy HMS", "mdy"))),
+                     hole     = trimws(location),
+                     z_water  = abs(as.numeric(z_water_m)),
+                     z_ice    = as.numeric(z_ice_m)) |>
+    dplyr::filter(!is.na(day), day >= rng[1], day <= rng[2])
+})
+
+# Model daily mean thickness on each measurement day
+model_daily_meas <- purrr::map_dfr(meas_keys, function(key) {
+  results[[key]] |>
+    dplyr::mutate(day = as.Date(time)) |>
+    dplyr::group_by(day) |>
+    dplyr::summarise(model = mean(thickness), .groups = "drop") |>
+    dplyr::mutate(lake_key = key)
+})
+
+freeboard_mean <- meas |>
+  dplyr::filter(!is.na(z_water), !is.na(z_ice)) |>
+  dplyr::group_by(lake_key) |>
+  dplyr::summarise(fb_mean = mean(z_ice - z_water), fb_sd = sd(z_ice - z_water),
+                   n_fb = dplyr::n(), .groups = "drop")
+
+meas <- meas |>
+  dplyr::left_join(freeboard_mean, by = "lake_key") |>
+  dplyr::left_join(model_daily_meas, by = c("lake_key", "day")) |>
+  dplyr::mutate(lake      = factor(purrr::map_chr(lake_key, ~ LAKE_CONFIGS[[.x]]$lake_name),
+                                   levels = lake_levels),
+                freeboard = z_ice - z_water,
+                period    = ifelse(day < as.Date("2021-07-01"), "2016–2020", "2021 onward"))
+
+meas_long <- meas |>
+  dplyr::filter(!is.na(model)) |>
+  tidyr::pivot_longer(c(z_water, z_ice), names_to = "type", values_to = "obs") |>
+  dplyr::filter(!is.na(obs)) |>
+  dplyr::mutate(
+    # depth to water is compared with the model as is; total thickness with model + mean freeboard
+    model_cmp = ifelse(type == "z_ice", model + fb_mean, model),
+    resid     = model_cmp - obs,
+    type      = factor(c(z_water = "Depth to water (z_water)",
+                         z_ice   = "Total ice thickness (z_ice)")[type],
+                       levels = c("Depth to water (z_water)", "Total ice thickness (z_ice)"))
+  )
+
+meas_cols <- c("Depth to water (z_water)" = "#D55E00", "Total ice thickness (z_ice)" = "#009E73")
+
+model_lines <- model_daily_meas |>
+  dplyr::filter(lake_key %in% meas_keys) |>
+  dplyr::left_join(freeboard_mean, by = "lake_key") |>
+  dplyr::mutate(lake = factor(purrr::map_chr(lake_key, ~ LAKE_CONFIGS[[.x]]$lake_name),
+                              levels = lake_levels)) |>
+  dplyr::transmute(lake, day,
+                   `Model (depth-to-water terms)` = model,
+                   `Model + mean freeboard (total thickness)` = model + fb_mean) |>
+  tidyr::pivot_longer(-c(lake, day), names_to = "series", values_to = "m")
+```
+
+### Model against each measurement type
+
+```{r meas-timeseries, fig.height = 12}
+ggplot() +
+  geom_line(data = model_lines, aes(day, m, linetype = series), colour = "#2166AC", linewidth = 0.5) +
+  geom_point(data = meas_long, aes(day, obs, colour = type, shape = type), size = 1.8, alpha = 0.85) +
+  scale_colour_manual(values = meas_cols, name = NULL) +
+  scale_shape_manual(values = c("Depth to water (z_water)" = 16, "Total ice thickness (z_ice)" = 17),
+                     name = NULL) +
+  scale_linetype_manual(values = c("Model (depth-to-water terms)" = "solid",
+                                   "Model + mean freeboard (total thickness)" = "22"), name = NULL) +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  facet_wrap(~ lake, ncol = 1, scales = "free_y") +
+  labs(x = NULL, y = "Ice thickness (m)",
+       title = "Modelled ice against both measurement types",
+       subtitle = "Compare orange points with the solid line, and green points with the dashed line.") +
+  theme_minimal(base_size = 12) +
+  theme(strip.text = element_text(face = "bold", hjust = 0),
+        panel.grid.minor = element_blank(), legend.position = "top", legend.box = "vertical")
+```
+
+### Residuals by measurement type
+
+```{r meas-resid, fig.height = 9}
+ggplot(meas_long, aes(day, resid, colour = type, shape = type)) +
+  geom_hline(yintercept = 0, colour = "grey40") +
+  geom_vline(xintercept = as.Date("2021-07-01"), colour = "grey80", linetype = "dashed") +
+  geom_point(size = 2, alpha = 0.85) +
+  scale_colour_manual(values = meas_cols, name = NULL) +
+  scale_shape_manual(values = c("Depth to water (z_water)" = 16, "Total ice thickness (z_ice)" = 17),
+                     name = NULL) +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  facet_wrap(~ lake, ncol = 1) +
+  labs(x = NULL, y = "Model − observed (m)",
+       title = "Model error for each measurement type",
+       subtitle = "Positive = model too thick. Total thickness is compared with model + mean freeboard. Dashed line = start of 2021–22 season.") +
+  theme_minimal(base_size = 12) +
+  theme(strip.text = element_text(face = "bold", hjust = 0),
+        panel.grid.minor = element_blank(), legend.position = "top")
+```
+
+```{r meas-table}
+fit_stats <- function(d) dplyr::summarise(d, n = dplyr::n(),
+                                          bias = mean(resid), rmse = sqrt(mean(resid^2)),
+                                          .groups = "drop")
+dplyr::bind_rows(
+  meas_long |> dplyr::group_by(lake, type, period) |> fit_stats(),
+  meas_long |> dplyr::group_by(lake, type) |> fit_stats() |> dplyr::mutate(period = "All")
+) |>
+  dplyr::mutate(period = factor(period, levels = c("2016–2020", "2021 onward", "All")),
+                cell = sprintf("%+.2f / %.2f (n=%d)", bias, rmse, n)) |>
+  dplyr::select(Lake = lake, type, period, cell) |>
+  tidyr::pivot_wider(names_from = period, values_from = cell) |>
+  dplyr::arrange(Lake, type) |>
+  dplyr::rename(`Measurement type` = type) |>
+  knitr::kable(caption = "Model fit by measurement type: bias / RMSE in metres (number of measurements)")
+```
+
+### Freeboard through time
+
+```{r meas-freeboard, fig.height = 7}
+fb <- dplyr::filter(meas, !is.na(freeboard))
+ggplot(fb, aes(day, freeboard)) +
+  geom_hline(data = dplyr::distinct(fb, lake, fb_mean), aes(yintercept = fb_mean),
+             colour = "grey50", linetype = "dashed") +
+  geom_point(aes(shape = grepl("^Inside", hole)), colour = "#0072B2", size = 2, alpha = 0.85) +
+  scale_shape_manual(values = c(`TRUE` = 16, `FALSE` = 1), breaks = c(TRUE, FALSE),
+                     labels = c(`TRUE` = "Inside hole", `FALSE` = "Other hole"), name = NULL) +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  facet_wrap(~ lake, ncol = 2) +
+  labs(x = NULL, y = "Freeboard: z_ice − z_water (m)",
+       title = "Freeboard at each measurement",
+       subtitle = "Dashed line = mean freeboard added to the model for the total-thickness comparison.") +
+  theme_minimal(base_size = 12) +
+  theme(strip.text = element_text(face = "bold", hjust = 0),
+        panel.grid.minor = element_blank(), legend.position = "top")
+```
+
+## Model input time series
+
+These are the meteorological time series each model run is driven by,
+after gap-filling and any adjustments made in the `00_` / `01_` scripts. They
+are daily means, saved when the models are re-run at the top of this report.
+
+```{r forcing-load}
+forcing_vars <- c(T_air             = "Air temperature (°C)",
+                  SW_in             = "Incoming shortwave (W m⁻²)",
+                  LWR_in            = "Incoming longwave (W m⁻²)",
+                  LWR_out           = "Outgoing longwave (W m⁻²)",
+                  wind              = "Wind speed (m s⁻¹)",
+                  relative_humidity = "Relative humidity (%)",
+                  pressure          = "Air pressure (kPa)",
+                  albedo            = "Albedo",
+                  snow_depth        = "Snow on the ice (cm)")
+
+forcing_paths <- file.path(path, lakes$forcing_file)
+have_forcing  <- file.exists(forcing_paths)
+
+forcing <- purrr::map2_dfr(forcing_paths[have_forcing], lakes$lake_key[have_forcing],
+                           ~ dplyr::mutate(readRDS(.x), lake_key = .y))
+
+if (nrow(forcing) > 0) {
+  forcing_long <- forcing |>
+    tidyr::pivot_longer(dplyr::any_of(names(forcing_vars)),
+                        names_to = "var", values_to = "value") |>
+    dplyr::filter(!is.na(value)) |>
+    dplyr::mutate(
+      value = dplyr::case_when(var == "T_air"      ~ value - 273.15,   # K -> °C
+                               var == "pressure"   ~ value / 1000,     # Pa -> kPa
+                               var == "snow_depth" ~ value * 100,      # m -> cm
+                               TRUE ~ value),
+      variable = factor(forcing_vars[var], levels = forcing_vars),
+      lake     = factor(purrr::map_chr(lake_key, ~ LAKE_CONFIGS[[.x]]$lake_name), levels = lake_levels),
+      region   = ifelse(lake_key %in% c("GL4", "LOC"), "Colorado Rockies", "McMurdo Dry Valleys")
+    ) |>
+    # drop variables that never vary for a lake (e.g. a constant albedo, or no snow)
+    dplyr::group_by(lake, variable) |>
+    dplyr::filter(dplyr::n_distinct(round(value, 6)) > 1) |>
+    # 30-day centred running mean to show the seasonal signal under the daily noise
+    dplyr::arrange(day, .by_group = TRUE) |>
+    dplyr::mutate(smooth = zoo::rollapply(value, 30, mean, na.rm = TRUE,
+                                          fill = NA, partial = TRUE, align = "center")) |>
+    dplyr::ungroup()
+}
+
+# Ice-covered periods (from the model output) to shade on the seasonal lakes' panels
+ice_periods <- purrr::imap_dfr(results[intersect(c("GL4", "LOC"), names(results))], function(res, key) {
+  d <- res |>
+    dplyr::mutate(day = as.Date(time)) |>
+    dplyr::group_by(day) |>
+    dplyr::summarise(ice = any(thickness > 0), .groups = "drop")
+  r <- rle(d$ice)
+  ends <- cumsum(r$lengths); starts <- ends - r$lengths + 1
+  tibble::tibble(lake_key = key, start = d$day[starts], end = d$day[ends])[r$values, ]
+})
+
+lake_cols_ts <- setNames(c("#0072B2", "#56B4E9", "#009E73", "#CC79A7", "#E69F00", "#D55E00"),
+                         lake_levels)
+```
+
+`r if (!all(have_forcing)) sprintf("**No saved input time series for %s.** Knit once with <code>rerun_models: true</code> to create them.", paste(purrr::map_chr(lakes$lake_key[!have_forcing], ~ LAKE_CONFIGS[[.x]]$lake_name), collapse = ", ")) else ""`
+
+### Inputs at each lake {.tabset}
+
+```{r forcing-fn}
+plot_forcing <- function(key) {
+  d <- dplyr::filter(forcing_long, lake_key == key)
+  if (nrow(d) == 0) return(invisible(NULL))
+  p <- ggplot(d, aes(day))
+  ip <- dplyr::filter(ice_periods, lake_key == key)
+  if (nrow(ip) > 0)
+    p <- p + geom_rect(data = ip, aes(xmin = start, xmax = end, ymin = -Inf, ymax = Inf),
+                       inherit.aes = FALSE, fill = "#DCE9F5", alpha = 0.7)
+  p +
+    geom_line(aes(y = value), colour = "grey70", linewidth = 0.25) +
+    geom_line(aes(y = smooth), colour = lake_cols_ts[[LAKE_CONFIGS[[key]]$lake_name]],
+              linewidth = 0.8, na.rm = TRUE) +
+    scale_x_date(date_breaks = "1 year", date_labels = "%Y", expand = c(0.01, 0)) +
+    facet_wrap(~ variable, ncol = 1, scales = "free_y", strip.position = "top") +
+    labs(x = NULL, y = NULL,
+         subtitle = paste0("Grey = daily mean; coloured = 30-day running mean",
+                           if (nrow(ip) > 0) "; blue shading = ice-covered periods" else "", ".")) +
+    theme_minimal(base_size = 11) +
+    theme(strip.text = element_text(face = "bold", hjust = 0),
+          panel.grid.minor = element_blank())
+}
+forcing_tab <- function(key) {
+  cat("\n\n#### ", LAKE_CONFIGS[[key]]$lake_name, "\n\n", sep = "")
+  p <- plot_forcing(key)
+  if (is.null(p)) cat("No saved input time series for this lake.\n\n") else print(p)
+  cat("\n\n")
+}
+```
+
+```{r forcing-tabs, results = "asis", fig.height = 13, fig.width = 11, eval = nrow(forcing) > 0}
+for (key in lakes$lake_key) forcing_tab(key)
+```
+
+### Comparing inputs across lakes
+
+```{r forcing-compare, fig.height = 11, eval = nrow(forcing) > 0}
+forcing_clim <- forcing_long |>
+  dplyr::mutate(month = lubridate::month(day)) |>
+  dplyr::group_by(region, lake, variable, month) |>
+  dplyr::summarise(value = mean(value), .groups = "drop")
+
+ggplot(forcing_clim, aes(month, value, colour = lake, linetype = region)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.3) +
+  scale_x_continuous(breaks = 1:12, labels = substr(month.abb, 1, 1)) +
+  scale_colour_manual(values = lake_cols_ts, name = NULL) +
+  scale_linetype_manual(values = c("McMurdo Dry Valleys" = "solid", "Colorado Rockies" = "22"),
+                        name = NULL) +
+  facet_wrap(~ variable, ncol = 2, scales = "free_y") +
+  labs(x = NULL, y = NULL,
+       title = "Monthly climatology of the model inputs",
+       subtitle = "Mean of daily values by calendar month over each lake's run. Dry Valleys summer = Dec–Jan; Rockies summer = Jun–Jul.") +
+  theme_minimal(base_size = 12) +
+  theme(strip.text = element_text(face = "bold", hjust = 0),
+        panel.grid.minor = element_blank(),
+        legend.position = "top") +
+  guides(colour = guide_legend(nrow = 2), linetype = guide_legend(nrow = 2))
 ```
 
 ## Individual lakes {.tabset}
