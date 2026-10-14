@@ -165,7 +165,7 @@ LAKE_CONFIGS <- list(
     L_nucleation      = 0.10,   # = dx; new ice forms at one grid step so the profile can grow
     Chi               = 0.25,
     albedo_multiplier = 1.00,
-    albedo_ice        = 0.85,   # constant dummy albedo — no AlbedoModel.csv for GL4
+    albedo_ice        = 0.70,   # constant dummy albedo — no AlbedoModel.csv for GL4
     seasonally_frozen = TRUE,
     start_filter      = as.POSIXct("2014-01-01 00:00:00"),
 
@@ -206,6 +206,21 @@ LAKE_CONFIGS <- list(
     ice_loc_filter    = NULL
   )
 )
+
+
+# ============================================================
+# Ice-thickness holes excluded everywhere
+# — locations matching this pattern are dropped from every lake's
+#   ice-thickness observations (model fitting, report plots), on top of
+#   each lake's own ice_loc_filter. B-011 holes (2022 field season, WLB and
+#   Lake Fryxell) are not part of the regular sampling transect.
+# ============================================================
+ICE_HOLE_EXCLUDE <- "B-?011"
+
+exclude_ice_holes <- function(df, pattern = ICE_HOLE_EXCLUDE) {
+  if (is.null(pattern) || !"location" %in% names(df)) return(df)
+  dplyr::filter(df, is.na(location) | !grepl(pattern, location, ignore.case = TRUE))
+}
 
 
 # ============================================================
@@ -270,7 +285,11 @@ prepare_lake_model_inputs <- function(
     secondary_air_end = as.POSIXct("2023-11-01 00:00:00"),
     lwr_extend_to     = as.POSIXct("2025-01-31 23:45:00"),
     ice_start         = as.POSIXct("2016-12-01"),
-    ice_end           = as.POSIXct("2024-02-01")
+    ice_end           = as.POSIXct("2024-02-01"),
+    albedo_source     = NULL    # "bb" = blue-box pixel (albedo.predict.bb) or
+                                # "wholelake" (albedo.predict.wholelake) from
+                                # AlbedoModel.csv; NULL = LAKE_CONFIGS$<lake>$albedo_source,
+                                # else "bb" (the original behaviour)
 ) {
 
   cfg <- lake_configs[[lake_key]]
@@ -484,25 +503,28 @@ prepare_lake_model_inputs <- function(
   rh_interp <- interp_to_model(rh_raw$date_time, rh_raw$rhh2o_3m_pct, "relative humidity")
 
   # ---- 10. Albedo (filtered to this lake) ----------------------------------
-  message("Preparing albedo...")
+  albedo_source <- albedo_source %||% cfg$albedo_source %||% "bb"
+  albedo_col <- c(bb = "albedo.predict.bb", wholelake = "albedo.predict.wholelake")[[
+    match.arg(albedo_source, c("bb", "wholelake"))]]
+  message(sprintf("Preparing albedo (%s)...", albedo_col))
 
   albedo_clean <- albedo_orig |>
     filter(lake == cfg$lake_name) |>
-    mutate(date = ymd(sed.date)) |>
-    drop_na(albedo.predict.bb)
+    mutate(date = ymd(sed.date), albedo_value = .data[[albedo_col]]) |>
+    drop_na(albedo_value)
 
   albedo_15min <- tibble(
     time = seq(floor_date(min(albedo_clean$date), "15 minutes"),
                ceiling_date(max(albedo_clean$date), "15 minutes"),
                by = "15 mins")
   ) |>
-    left_join(albedo_clean |> select(date, albedo.predict.bb),
+    left_join(albedo_clean |> select(date, albedo_value),
               by = c("time" = "date")) |>
     arrange(time) |>
-    fill(albedo.predict.bb, .direction = "down")
+    fill(albedo_value, .direction = "down")
 
   albedo_interp <- interp_to_model(albedo_15min$time,
-                                   albedo_15min$albedo.predict.bb, "albedo")
+                                   albedo_15min$albedo_value, "albedo")
 
   # Apply this lake's albedo multiplier (LAKE_CONFIGS$<lake>$albedo_multiplier;
   # defaults to 1 = no change if a config omits it). This lets you scale a
@@ -528,6 +550,7 @@ prepare_lake_model_inputs <- function(
   if (!is.null(cfg$ice_loc_filter)) {
     ice_thickness_clean <- cfg$ice_loc_filter(ice_thickness_clean)
   }
+  ice_thickness_clean <- exclude_ice_holes(ice_thickness_clean)
 
   # ---- 12. Assemble ---------------------------------------------------------
   message("Assembling time series...")
@@ -1920,6 +1943,7 @@ load_ice_observations <- function(
                     z_water_m = z_water_m * -1) |>
       dplyr::filter(location_name == cfg$lake_name)
     if (!is.null(cfg$ice_loc_filter)) obs <- cfg$ice_loc_filter(obs)
+    obs <- exclude_ice_holes(obs)
   }
 
   obs <- obs |>

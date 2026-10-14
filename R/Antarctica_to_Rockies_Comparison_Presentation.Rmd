@@ -9,6 +9,9 @@ params:
   #         building the report, so changes to R/functions/ are picked up.
   # FALSE = skip the model runs and use the CSVs already in Data/model_outputs/.
   rerun_models: true
+  # TRUE = also re-run R/Compare_Albedo_Sources.R (every Dry Valley lake with
+  #        blue-box and whole-lake albedo; roughly doubles the run time).
+  rerun_albedo_comparison: true
 ---
 
 ```{r setup, include = FALSE}
@@ -215,7 +218,7 @@ The difference between them is the **freeboard**: the ice standing above the
 water level. To compare the model with total thickness, each lake's mean
 freeboard over the model period is added to the model. Holes are filtered the
 same way as for the model fit (Inside holes only at West Lake Bonney, "O"
-holes at Lake Fryxell).
+holes at Lake Fryxell), and B-011 holes are excluded everywhere.
 
 ```{r meas-prep}
 meas_keys <- intersect(c("WLB", "ELB", "LH", "LF"), names(results))
@@ -227,6 +230,7 @@ meas <- purrr::map_dfr(meas_keys, function(key) {
   cfg <- LAKE_CONFIGS[[key]]
   d <- dplyr::filter(ice_raw, location_name == cfg$lake_name)
   if (is.function(cfg$ice_loc_filter)) d <- cfg$ice_loc_filter(d)
+  d <- exclude_ice_holes(d)                     # drop B-011 etc. (ICE_HOLE_EXCLUDE)
   rng <- range(as.Date(results[[key]]$time))
   d |>
     dplyr::transmute(lake_key = key,
@@ -362,6 +366,182 @@ ggplot(fb, aes(day, freeboard)) +
   theme_minimal(base_size = 12) +
   theme(strip.text = element_text(face = "bold", hjust = 0),
         panel.grid.minor = element_blank(), legend.position = "top")
+```
+
+### Lake levels
+
+Surveyed lake levels from the MCM LTER record
+(`Data/mcmlter-lake-levels-20260318.csv`). Lake Bonney's level is recorded
+under East Lake Bonney; both lobes share it when the lake is high enough to
+connect through the narrows. Rising water lifts the water level in a sampling
+hole relative to the ice surface, which changes the depth-to-water
+measurement and can bring heat to the ice base. Shading = model period.
+
+```{r lake-levels, fig.height = 7}
+levels_raw <- readr::read_csv(file.path(path, "Data/mcmlter-lake-levels-20260318.csv"),
+                              show_col_types = FALSE)
+level_lakes <- c("East Lake Bonney" = "Lake Bonney (WLB + ELB)",
+                 "Lake Hoare"       = "Lake Hoare",
+                 "Lake Fryxell"     = "Lake Fryxell")
+model_span <- range(do.call(c, lapply(results[meas_keys], function(r) as.Date(range(r$time)))))
+
+lake_levels_df <- levels_raw |>
+  dplyr::filter(location_name %in% names(level_lakes)) |>
+  dplyr::mutate(date  = as.Date(date_surveyed),
+                lake  = factor(level_lakes[location_name], levels = level_lakes),
+                level = as.numeric(lake_level_masl)) |>
+  dplyr::filter(!is.na(level), date >= as.Date("2012-10-01"))
+
+ggplot(lake_levels_df, aes(date, level)) +
+  annotate("rect", xmin = model_span[1], xmax = model_span[2],
+           ymin = -Inf, ymax = Inf, fill = "#DCE9F5", alpha = 0.6) +
+  geom_line(colour = "grey60", linewidth = 0.4) +
+  geom_point(aes(colour = lubridate::month(date) %in% c(12, 1, 2)), size = 1.8) +
+  scale_colour_manual(values = c(`TRUE` = "#D55E00", `FALSE` = "#0072B2"), breaks = c(TRUE, FALSE),
+                      labels = c(`TRUE` = "Summer survey (Dec–Feb)", `FALSE` = "Spring survey (Oct–Nov)"),
+                      name = NULL) +
+  scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
+  facet_wrap(~ lake, ncol = 1, scales = "free_y") +
+  labs(x = NULL, y = "Lake level (m above sea level)",
+       title = "Surveyed lake levels",
+       subtitle = "Summer surveys come after the melt season; spring surveys before it.") +
+  theme_minimal(base_size = 12) +
+  theme(strip.text = element_text(face = "bold", hjust = 0),
+        panel.grid.minor = element_blank(), legend.position = "top")
+```
+
+## Albedo source: blue box vs whole lake
+
+The Dry Valley lakes' albedo comes from `Data/AlbedoModel.csv`, which has two
+estimates: the **blue-box** pixel (`albedo.predict.bb`, the default model
+setup) and the **whole-lake** mean (`albedo.predict.wholelake`). These plots
+compare model runs that are identical except for which one is used. The runs
+come from `R/Compare_Albedo_Sources.R` (knit with
+`rerun_albedo_comparison: true` to re-run them).
+
+```{r albedo-compare-run, eval = isTRUE(params$rerun_albedo_comparison)}
+local({
+  old_wd <- setwd(path)
+  on.exit(setwd(old_wd), add = TRUE)
+  source("R/Compare_Albedo_Sources.R", local = new.env(parent = globalenv()))
+})
+```
+
+```{r albedo-compare-load}
+alb_dir   <- file.path(path, "Data/model_outputs/albedo_comparison")
+alb_files <- list.files(alb_dir, pattern = "_(bb|wholelake)_output\\.csv$", full.names = TRUE)
+alb_src_labels <- c(bb        = "Blue box (albedo.predict.bb)",
+                    wholelake = "Whole lake (albedo.predict.wholelake)")
+alb_cols <- setNames(c("#0072B2", "#E69F00"), alb_src_labels)
+
+# Only build the table when comparison runs exist (with no files there are no
+# columns, so `time` would resolve to base R's time() function)
+has_alb <- length(alb_files) > 0
+if (has_alb) {
+  alb_daily <- purrr::map_dfr(alb_files, readr::read_csv, show_col_types = FALSE) |>
+    dplyr::mutate(day = as.Date(time)) |>
+    dplyr::group_by(lake_key, albedo_source, day) |>
+    dplyr::summarise(thickness = mean(thickness), albedo = mean(albedo),
+                     SW_abs = mean(SW_abs), surface_loss = sum(surface_loss),
+                     .groups = "drop") |>
+    dplyr::mutate(lake   = factor(purrr::map_chr(lake_key, ~ LAKE_CONFIGS[[.x]]$lake_name),
+                                  levels = lake_levels),
+                  source = factor(alb_src_labels[albedo_source], levels = alb_src_labels))
+}
+```
+
+`r if (!has_alb) "**No albedo comparison runs found.** Knit once with <code>rerun_albedo_comparison: true</code>, or run <code>R/Compare_Albedo_Sources.R</code> from the repository root." else ""`
+
+### Albedo forcing
+
+```{r albedo-compare-forcing, fig.height = 9, eval = has_alb}
+# Albedo only matters when the sun is up, so show the Oct–Feb summer values
+alb_summer <- dplyr::filter(alb_daily, lubridate::month(day) %in% c(10, 11, 12, 1, 2))
+ggplot(alb_summer, aes(day, albedo, colour = source)) +
+  geom_point(size = 0.6, alpha = 0.6) +
+  scale_colour_manual(values = alb_cols, name = NULL) +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  facet_wrap(~ lake, ncol = 1) +
+  labs(x = NULL, y = "Albedo",
+       title = "Albedo forcing from each source (Oct–Feb)",
+       subtitle = "Daily values; each summer's images are carried forward between acquisition dates.") +
+  theme_minimal(base_size = 12) +
+  theme(strip.text = element_text(face = "bold", hjust = 0),
+        panel.grid.minor = element_blank(), legend.position = "top") +
+  guides(colour = guide_legend(override.aes = list(size = 3, alpha = 1)))
+```
+
+### Modelled ice thickness
+
+```{r albedo-compare-thickness, fig.height = 11, eval = has_alb}
+alb_obs <- purrr::map_dfr(intersect(names(ice_obs), unique(alb_daily$lake_key)), function(key) {
+  o <- ice_obs[[key]]
+  if (is.null(o) || nrow(o) == 0) return(NULL)
+  tibble::tibble(lake_key = key, day = as.Date(o$date_time), obs = o$z_water_m)
+}) |>
+  dplyr::mutate(lake = factor(purrr::map_chr(lake_key, ~ LAKE_CONFIGS[[.x]]$lake_name),
+                              levels = lake_levels))
+
+ggplot(alb_daily, aes(day, thickness, colour = source)) +
+  geom_line(linewidth = 0.6) +
+  geom_point(data = alb_obs, aes(day, obs), inherit.aes = FALSE,
+             colour = "grey15", size = 1.5) +
+  scale_colour_manual(values = alb_cols, name = NULL) +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  facet_wrap(~ lake, ncol = 1, scales = "free_y") +
+  labs(x = NULL, y = "Ice thickness (m)",
+       title = "Modelled ice thickness with each albedo source",
+       subtitle = "Black points = observed depth to water (same holes as the main model fit).") +
+  theme_minimal(base_size = 12) +
+  theme(strip.text = element_text(face = "bold", hjust = 0),
+        panel.grid.minor = element_blank(), legend.position = "top")
+```
+
+```{r albedo-compare-diff, fig.height = 7, eval = has_alb}
+alb_diff <- alb_daily |>
+  dplyr::select(lake, day, albedo_source, thickness) |>
+  tidyr::pivot_wider(names_from = albedo_source, values_from = thickness) |>
+  dplyr::filter(!is.na(bb), !is.na(wholelake)) |>
+  dplyr::mutate(diff = wholelake - bb)
+
+ggplot(alb_diff, aes(day, diff)) +
+  geom_hline(yintercept = 0, colour = "grey40") +
+  geom_line(colour = "#7A4F9A", linewidth = 0.7) +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  facet_wrap(~ lake, ncol = 2) +
+  labs(x = NULL, y = "Whole lake − blue box (m)",
+       title = "Difference in modelled thickness",
+       subtitle = "Negative = thinner ice with whole-lake albedo.") +
+  theme_minimal(base_size = 12) +
+  theme(strip.text = element_text(face = "bold", hjust = 0),
+        panel.grid.minor = element_blank())
+```
+
+```{r albedo-compare-table, eval = has_alb}
+alb_fit <- alb_obs |>
+  dplyr::inner_join(dplyr::select(alb_daily, lake_key, lake, day, source, thickness),
+                    by = c("lake_key", "lake", "day")) |>
+  dplyr::mutate(resid  = thickness - obs,
+                period = ifelse(day < as.Date("2021-07-01"), "2016–2020", "2021 onward"))
+fit_cells <- function(d) dplyr::summarise(d, cell = sprintf("%+.2f / %.2f (n=%d)",
+                                                             mean(resid), sqrt(mean(resid^2)), dplyr::n()),
+                                          .groups = "drop")
+summer_sw <- alb_daily |>
+  dplyr::filter(lubridate::month(day) %in% c(11, 12, 1, 2)) |>
+  dplyr::group_by(lake, source) |>
+  dplyr::summarise(`Mean summer albedo` = sprintf("%.2f", mean(albedo)),
+                   `Mean summer SW_abs (W m⁻²)` = sprintf("%.1f", mean(SW_abs)),
+                   .groups = "drop")
+dplyr::bind_rows(
+  alb_fit |> dplyr::group_by(lake, source, period) |> fit_cells(),
+  alb_fit |> dplyr::group_by(lake, source) |> fit_cells() |> dplyr::mutate(period = "All")
+) |>
+  dplyr::mutate(period = factor(period, levels = c("2016–2020", "2021 onward", "All"))) |>
+  tidyr::pivot_wider(names_from = period, values_from = cell) |>
+  dplyr::left_join(summer_sw, by = c("lake", "source")) |>
+  dplyr::arrange(lake, source) |>
+  dplyr::rename(Lake = lake, `Albedo source` = source) |>
+  knitr::kable(caption = "Fit to observed depth to water (bias / RMSE in m, n) and summer (Nov–Feb) forcing for each albedo source")
 ```
 
 ## Model input time series

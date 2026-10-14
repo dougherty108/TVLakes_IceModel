@@ -37,6 +37,7 @@ source("R/GL4/00_GL4_data_preparation.R")
 # warming trend to T_air (and recompute LWR_out / delta_T as needed).
 warming_rate <- 0.000   # 0.3% per year
 
+# prepare time series
 ts_ready_GL4 <- prepare_model_input(
   inputs$time_series,
   warming_rate = warming_rate,
