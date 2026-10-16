@@ -19,10 +19,18 @@ params:
 ```{r setup, include = FALSE}
 # Repository root. Every path below is built from it with file.path(), so the
 # chunks work both when knitting and when run one at a time in RStudio.
-path <- path.expand("~/Library/CloudStorage/OneDrive-UCB-O365 (9-15-26 4:10 PM)/Documents/R-Repositories/TVLakes_IceModel")
+path <- path.expand("~/Library/CloudStorage/OneDrive-UCB-O365/Documents/R-Repositories/TVLakes_IceModel")
 if (!dir.exists(path)) stop("Repository folder not found: ", path)
+# Every plot is also saved as a PNG in figures/Flux_Thickness_PCA/ at the repository root,
+# named after the chunk that makes it (e.g. biplot-12-1.png). Re-knitting
+# overwrites them. fig.retina = 2 (the html_document default) doubles dpi, so
+# the PNGs are written at 300 dpi.
+fig_dir <- file.path(path, "figures", "Flux_Thickness_PCA")
+dir.create(fig_dir, showWarnings = FALSE, recursive = TRUE)
 knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE,
-                      fig.width = 10, fig.height = 7)
+                      fig.width = 10, fig.height = 7,
+                      dev = "png", dpi = 150, fig.retina = 2,
+                      fig.path = paste0(fig_dir, "/"))
 ```
 
 ```{r libraries}

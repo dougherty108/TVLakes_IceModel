@@ -20,8 +20,17 @@ params:
 # (which runs chunks from this Rmd's folder, R/, not the repo root).
 path <- path.expand("~/Library/CloudStorage/OneDrive-UCB-O365/Documents/R-Repositories/TVLakes_IceModel")
 if (!dir.exists(path)) stop("Repository folder not found: ", path)
+# Every plot is also saved as a PNG in figures/Antarctica_to_Rockies/ at the repository root,
+# named after the chunk that makes it (e.g. meas-timeseries-1.png; chunks
+# that draw one plot per lake are numbered in lake order). Re-knitting
+# overwrites them. fig.retina = 2 (the html_document default) doubles dpi, so
+# the PNGs are written at 300 dpi.
+fig_dir <- file.path(path, "figures", "Antarctica_to_Rockies")
+dir.create(fig_dir, showWarnings = FALSE, recursive = TRUE)
 knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE,
-                      fig.width = 10, fig.height = 7)
+                      fig.width = 10, fig.height = 7,
+                      dev = "png", dpi = 150, fig.retina = 2,
+                      fig.path = paste0(fig_dir, "/"))
 ```
 
 ```{r libraries}

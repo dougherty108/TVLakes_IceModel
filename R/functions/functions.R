@@ -943,7 +943,7 @@ prepare_gl4_model_inputs <- function(
       e_sat = 611.0 * exp(17.27 * T_air_C / (T_air_C + 237.3)),
       e_a   = (RH / 100) * e_sat,        # actual vapour pressure (Pa)
       # Brutsaert (1975) atmospheric emissivity
-      emissivity_atm = 1.24 * (e_a / T_air)^(1/7),
+      emissivity_atm = 1.24 * ((e_a / 100) / T_air)^(1/7),
       emissivity_atm = pmin(pmax(emissivity_atm, 0.6), 1.0),
       LWR_in  = emissivity_atm * constants$sigma * T_air^4,
       LWR_out = constants$emissivity * constants$sigma * constants$Tf^4,
