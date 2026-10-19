@@ -42,6 +42,15 @@ CONSTANTS <- list(
                               # layer wetter than phi_max drains); FALSE = it is lost at
                               # once (the ice thins straight away)
   phi_max        = 0.30,      # liquid fraction above which a layer drains (0–1)
+
+  # Conductive flux Qc in the surface energy balance (ice phase) — see run_ice_model()
+  #   "air_change"   original: k * (T_air(t-1) - T_air(t)) / dx, i.e. only the
+  #                  hour-to-hour change in air temperature (can fake surface heating,
+  #                  e.g. ~110 W m^-2 for a 5 K warm-up, even in the polar night)
+  #   "ice_gradient" conduction between the surface node and the node below it on
+  #                  the current ice profile: k * (T_surface - T_node2) / h
+  #   "none"         no Qc term (conduction is left to the heat equation)
+  Qc_method      = "ice_gradient",
   sw_to_base     = 0.0,       # fraction of SW transmitted through the ice base that melts
                               # the base; the rest heats the lake (0 = all to the lake)
 
@@ -283,7 +292,7 @@ lake_constants <- function(lake_key, lake_configs = LAKE_CONFIGS, constants = CO
   if (!is.null(cfg$L_nucleation))      overrides$L_nucleation      <- cfg$L_nucleation
   # optional per-lake shortwave-penetration settings
   for (nm in c("sw_penetration", "i0", "kappa_ice", "sw_to_base",
-               "retain_meltwater", "phi_max"))
+               "retain_meltwater", "phi_max", "Qc_method"))
     if (!is.null(cfg[[nm]])) overrides[[nm]] <- cfg[[nm]]
   modifyList(constants, overrides)
 }
@@ -1310,6 +1319,10 @@ surface_temp_energy_balance <- function(T_air, SW_abs, LWR_in, Ql, H, L,
 # and the conductive flux Qc are computed the same way for every method.
 # Two extra output columns are returned: delta_T (K) and T_surface (K).
 #
+# Conductive flux (constants$Qc_method): "air_change" (original, k*(T_air(t-1) -
+#   T_air(t))/dx), "ice_gradient" (k*(T_surface - T_node2)/h from the current ice
+#   profile, h = actual node spacing), or "none". Default in CONSTANTS.
+#
 # Shortwave penetration (constants$sw_penetration = TRUE; Beer–Lambert)
 #   Net shortwave SW_net = SW_in * (1 - albedo). A fraction (1 - i0) is absorbed
 #   at the surface; the rest, I0 = i0 * SW_net, enters the ice and decays as
@@ -1382,6 +1395,8 @@ run_ice_model <- function(
   rho_c_ice      <- k / alpha               # volumetric heat capacity of ice (J m^-3 K^-1), = rho * c
   retain_mw      <- sw_penetration && !isFALSE(constants$retain_meltwater)
   phi_max        <- constants$phi_max %||% 0.30
+  Qc_method      <- match.arg(constants$Qc_method %||% "air_change",
+                              c("air_change", "ice_gradient", "none"))
 
   dt_sec <- dt * 86400
   r      <- alpha * dt_sec / dx^2
@@ -1603,8 +1618,13 @@ run_ice_model <- function(
       out_delta_T[t_idx]   <- delta_T
       out_T_surface[t_idx] <- T_surf
 
-      # -- Conductive flux -------------------------------------------------
-      Qc <- if (length(prevT) >= 1) k * (prevT[1] - T_air) / dx else 0
+      # -- Conductive flux (Qc_method; positive = heat from the surface into the ice)
+      Qc <- switch(Qc_method,
+        air_change   = if (length(prevT) >= 1) k * (prevT[1] - T_air) / dx else 0,
+        ice_gradient = if (n_nodes >= 2 && !is.na(prevL) && prevL > 0)
+                         k * (newT[1] - newT[2]) / (prevL / (n_nodes - 1)) else 0,
+        none         = 0)
+      if (is.na(Qc)) Qc <- 0
 
       # -- Net surface flux and mass balance --------------------------------
       surface_flux <- SW_abs + (LW_net - Qc) + Qh + Ql
