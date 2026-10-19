@@ -1,0 +1,805 @@
+---
+title: "TV Lakes Ice Model · Output Dashboard"
+output:
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: scroll
+    theme:
+      version: 4
+      bootswatch: flatly
+---
+
+```{r setup, include = FALSE}
+# Interactive (plotly) dashboard of the saved ice-model outputs, following the
+# sections of Antarctica_to_Rockies_Comparison_Presentation.Rmd.
+#
+# It only READS the saved outputs in Data/model_outputs/; it does not re-run
+# the models. To refresh it after changing R/functions/, knit
+# Antarctica_to_Rockies_Comparison_Presentation.Rmd (rerun_models: true) first,
+# then knit this file.
+#
+# Every chart: drag to zoom, double-click to reset, click a legend entry to
+# hide it (double-click to show only that one), camera icon saves a PNG.
+
+path <- path.expand("~/Library/CloudStorage/OneDrive-UCB-O365/Documents/R-Repositories/TVLakes_IceModel")
+if (!dir.exists(path)) stop("Repository folder not found: ", path)
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+options(knitr.kable.NA = "–")
+
+source(file.path(path, "R/functions/libraries.R"))
+source(file.path(path, "R/functions/functions.R"))
+pacman::p_load(plotly, flexdashboard)
+# plotly masks dplyr::filter and graphics::layout; be explicit
+filter <- dplyr::filter
+layout <- plotly::layout
+```
+
+```{r data}
+# ---- Lakes ------------------------------------------------------------------
+lakes <- tibble::tribble(
+  ~lake_key, ~region,               ~output_file,
+  "WLB",     "McMurdo Dry Valleys", "Data/model_outputs/WLB_2017_2024_output.csv",
+  "ELB",     "McMurdo Dry Valleys", "Data/model_outputs/ELB_2017_2024_output.csv",
+  "LH",      "McMurdo Dry Valleys", "Data/model_outputs/LH_2017_2024_output.csv",
+  "LF",      "McMurdo Dry Valleys", "Data/model_outputs/LF_2017_2024_output.csv",
+  "GL4",     "Colorado Rockies",    "Data/model_outputs/GL4_2014_2025_output.csv",
+  "LOC",     "Colorado Rockies",    "Data/model_outputs/LOC_2017_2024_output.csv"
+)
+lakes <- lakes[file.exists(file.path(path, lakes$output_file)), ]
+keys      <- lakes$lake_key
+dv_keys   <- intersect(c("WLB", "ELB", "LH", "LF"), keys)
+rk_keys   <- intersect(c("GL4", "LOC"), keys)
+lake_name <- purrr::map_chr(LAKE_CONFIGS[keys], "lake_name")
+region_of <- setNames(lakes$region, keys)
+# Okabe–Ito: same lake colours as the report
+lake_cols <- setNames(c("#0072B2", "#56B4E9", "#009E73", "#CC79A7", "#E69F00", "#D55E00"),
+                      c("WLB", "ELB", "LH", "LF", "GL4", "LOC"))[keys]
+
+flux_vars <- c(SW_abs       = "Absorbed shortwave",
+               LW_net       = "Net longwave",
+               sensible_Q   = "Sensible heat",
+               latent_Q     = "Latent heat",
+               conductive_Q = "Conductive (−Qc)")
+flux_cols <- setNames(c("#E69F00", "#0072B2", "#D55E00", "#009E73", "#CC79A7"), flux_vars)
+
+# ---- Model output and observations ------------------------------------------
+results <- purrr::map(file.path(path, lakes$output_file), readr::read_csv,
+                      show_col_types = FALSE) |>
+  purrr::set_names(keys)
+
+ice_obs <- purrr::imap(results, function(res, key) {
+  load_ice_observations(key, project_path = path, time_range = range(res$time, na.rm = TRUE))
+})
+
+# Daily summaries. Fluxes are averaged over ice-covered hours only (as in the
+# report), so the open-water season at the Rockies lakes is left out.
+daily <- purrr::imap_dfr(results, function(res, key) {
+  if (!"phase" %in% names(res)) res$phase <- "ice"
+  res |>
+    dplyr::mutate(day = as.Date(time), on_ice = phase == "ice",
+                  conductive_Q = -conductive_Q) |>
+    dplyr::group_by(day) |>
+    dplyr::summarise(
+      thickness    = mean(thickness, na.rm = TRUE),
+      surface_loss = sum(surface_loss, na.rm = TRUE),
+      bottom_gain  = sum(bottom_gain, na.rm = TRUE),
+      dplyr::across(dplyr::all_of(names(flux_vars)),
+                    ~ if (any(on_ice)) mean(.x[on_ice], na.rm = TRUE) else NA_real_),
+      net_flux     = if (any(on_ice)) mean(surface_heat_flux[on_ice], na.rm = TRUE) else NA_real_,
+      .groups = "drop") |>
+    # rounding keeps the embedded plot data (and the HTML file) small
+    dplyr::mutate(thickness = round(thickness, 3),
+                  dplyr::across(c(dplyr::all_of(names(flux_vars)), net_flux), ~ round(.x, 1)),
+                  lake_key = key)
+})
+
+obs_all <- purrr::imap_dfr(ice_obs, function(o, key) {
+  if (is.null(o) || nrow(o) == 0) return(NULL)
+  tibble::tibble(lake_key = key, day = as.Date(o$date_time),
+                 obs = abs(o$z_water_m), hole = o$location)
+})
+
+fit <- obs_all |>
+  dplyr::inner_join(dplyr::select(daily, lake_key, day, model = thickness),
+                    by = c("lake_key", "day")) |>
+  dplyr::mutate(resid = model - obs, lake = lake_name[lake_key])
+
+# ---- Shared plotly styling --------------------------------------------------
+font_family <- "Helvetica Neue, Helvetica, Arial, sans-serif"
+finish <- function(p, hovermode = "closest", legend_y = 1.12, ...) {
+  p <- plotly_build(p)
+  # plotly repeats a constant hovertemplate once per point; collapse it so the
+  # embedded data (and the HTML file) stays small
+  p$x$data <- lapply(p$x$data, function(tr) {
+    for (a in c("hovertemplate", "hoverinfo")) {
+      u <- unique(Filter(Negate(is.null), as.list(tr[[a]])))
+      if (length(tr[[a]]) > 1 && length(u) == 1) tr[[a]] <- u[[1]]
+    }
+    tr
+  })
+  p |>
+    layout(font = list(family = font_family, size = 12, color = "#2b2b2b"),
+           hovermode = hovermode,
+           legend = list(orientation = "h", y = legend_y, x = 0),
+           margin = list(l = 60, r = 20, t = 30, b = 40),
+           paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)", ...) |>
+    config(displaylogo = FALSE,
+           modeBarButtonsToRemove = c("lasso2d", "select2d", "autoScale2d"),
+           toImageButtonOptions = list(format = "png", scale = 3))
+}
+ax_y <- function(title, ...) list(title = title, zeroline = FALSE, gridcolor = "#e6e6e6", ...)
+ax_x <- function(title = "", ...) list(title = title, zeroline = FALSE, gridcolor = "#e6e6e6", ...)
+fade <- function(hex, a) { v <- grDevices::col2rgb(hex); sprintf("rgba(%d,%d,%d,%.2f)", v[1], v[2], v[3], a) }
+month_axis <- ax_x(tickvals = 1:12, ticktext = month.abb)
+
+# One flexdashboard tab per lake: knits `fun("<key>")` under a ### heading
+lake_tabs <- function(fun, tab_keys = keys) {
+  src <- unlist(lapply(tab_keys, function(k) c(
+    sprintf("### %s", lake_name[[k]]), "",
+    "```{r}", sprintf("%s('%s')", fun, k), "```", "")))
+  cat(knitr::knit_child(text = src, quiet = TRUE, envir = globalenv()), sep = "\n")
+}
+```
+
+Overview
+=====================================================================
+
+```{css, echo = FALSE}
+body .navbar.navbar-inverse { background-color: #2C3E50 !important; border-color: #2C3E50 !important; }
+.navbar .navbar-nav > li > a, .navbar .navbar-brand { color: #ffffff !important; }
+.navbar .navbar-nav > li.active > a { background-color: #1A252F !important; }
+```
+
+Row {data-height=120}
+---------------------------------------------------------------------
+
+### Lakes modelled
+
+```{r}
+valueBox(length(keys), caption = sprintf("lakes modelled · %d McMurdo Dry Valleys, %d Colorado Rockies",
+                                         length(dv_keys), length(rk_keys)),
+         icon = "fa-snowflake", color = "#2C3E50")
+```
+
+### Ice-thickness observations
+
+```{r}
+valueBox(nrow(fit), caption = "observations matched to a model day", icon = "fa-ruler-vertical",
+         color = "#18BC9C")
+```
+
+### Overall fit
+
+```{r}
+valueBox(sprintf("%.2f m", sqrt(mean(fit$resid^2))),
+         caption = sprintf("RMSE across all lakes (bias %+.2f m)", mean(fit$resid)),
+         icon = "fa-bullseye", color = "#3498DB")
+```
+
+Row {data-height=330}
+---------------------------------------------------------------------
+
+### Summary by lake
+
+```{r}
+n_years <- function(d) as.numeric(diff(range(d))) / 365.25
+lake_summary <- daily |>
+  dplyr::group_by(lake_key) |>
+  dplyr::summarise(Start = min(day), End = max(day),
+                   `Mean thickness (m)` = mean(thickness),
+                   `Min (m)` = min(thickness), `Max (m)` = max(thickness),
+                   `Surface melt (m/yr)` = sum(surface_loss) / n_years(day),
+                   `Bottom growth (m/yr)` = sum(bottom_gain) / n_years(day),
+                   .groups = "drop") |>
+  dplyr::left_join(fit |>
+                     dplyr::group_by(lake_key) |>
+                     dplyr::summarise(`Obs (n)` = dplyr::n(),
+                                      `Bias (m)` = mean(resid),
+                                      `RMSE (m)` = sqrt(mean(resid^2)), .groups = "drop"),
+                   by = "lake_key") |>
+  dplyr::mutate(Lake = lake_name[lake_key], Region = region_of[lake_key],
+                lake_key = factor(lake_key, levels = keys)) |>
+  dplyr::arrange(lake_key) |>
+  dplyr::select(Lake, Region, Start, End, dplyr::everything(), -lake_key)
+
+knitr::kable(lake_summary, digits = 2, format = "html",
+             table.attr = 'class="table table-sm table-hover"')
+```
+
+Row {data-height=520}
+---------------------------------------------------------------------
+
+```{r}
+region_thickness <- function(region_keys) {
+  p <- plot_ly()
+  for (k in region_keys) {
+    d <- dplyr::filter(daily, lake_key == k)
+    o <- dplyr::filter(obs_all, lake_key == k)
+    p <- p |>
+      add_lines(data = d, x = ~day, y = ~thickness, name = lake_name[[k]], legendgroup = k,
+                line = list(color = lake_cols[[k]], width = 1.6),
+                hovertemplate = "%{x|%Y-%m-%d}<br>Model %{y:.2f} m<extra>%{fullData.name}</extra>")
+    if (nrow(o) > 0)
+      p <- p |>
+        add_markers(data = o, x = ~day, y = ~obs, name = paste(lake_name[[k]], "(observed)"),
+                    legendgroup = k, showlegend = FALSE,
+                    marker = list(color = lake_cols[[k]], size = 7, line = list(color = "white", width = 1)),
+                    hovertemplate = "%{x|%Y-%m-%d}<br>Observed %{y:.2f} m<extra>%{fullData.name}</extra>")
+  }
+  p |> finish(yaxis = ax_y("Ice thickness (m)"), xaxis = ax_x(rangeslider = list(visible = TRUE)))
+}
+```
+
+### McMurdo Dry Valleys: modelled (lines) and observed (points) ice thickness
+
+```{r}
+region_thickness(dv_keys)
+```
+
+### Colorado Rockies: modelled (lines) and observed (points) ice thickness
+
+```{r}
+region_thickness(rk_keys)
+```
+
+Ice thickness
+=====================================================================
+
+Row {.tabset data-height=620}
+---------------------------------------------------------------------
+
+```{r}
+lake_thickness_plot <- function(k) {
+  d <- dplyr::filter(daily, lake_key == k)
+  o <- dplyr::filter(obs_all, lake_key == k)
+  p1 <- plot_ly(d, x = ~day) |>
+    add_lines(y = ~thickness, name = "Modelled (daily mean)", line = list(color = "#2166AC", width = 1.8),
+              hovertemplate = "Model %{y:.2f} m<extra></extra>")
+  if (nrow(o) > 0)
+    p1 <- p1 |>
+      add_markers(data = o, x = ~day, y = ~obs, name = "Observed depth to water", text = ~hole,
+                  marker = list(color = "#D6604D", size = 8, line = list(color = "white", width = 1)),
+                  hovertemplate = "Observed %{y:.2f} m<br>%{text}<extra></extra>")
+  wk <- d |>
+    dplyr::mutate(week = as.Date(lubridate::floor_date(day, "week"))) |>
+    dplyr::group_by(week) |>
+    dplyr::summarise(surface = round(-sum(surface_loss) * 100, 2),
+                     bottom  = round(sum(bottom_gain) * 100, 2), .groups = "drop")
+  p2 <- plot_ly(wk, x = ~week) |>
+    add_bars(y = ~surface, name = "Surface melt", marker = list(color = "#E69F00"),
+             hovertemplate = "Surface %{y:.2f} cm<extra></extra>") |>
+    add_bars(y = ~bottom, name = "Bottom growth / melt", marker = list(color = "#0072B2"),
+             hovertemplate = "Bottom %{y:+.2f} cm<extra></extra>")
+  subplot(p1, p2, nrows = 2, shareX = TRUE, heights = c(0.68, 0.32), titleY = TRUE) |>
+    finish(hovermode = "x unified", barmode = "relative", bargap = 0,
+           yaxis = ax_y("Ice thickness (m)"), yaxis2 = ax_y("Weekly change (cm)"),
+           xaxis = ax_x())
+}
+```
+
+```{r, results = "asis"}
+lake_tabs("lake_thickness_plot")
+```
+
+Row {data-height=40}
+---------------------------------------------------------------------
+
+**Top:** modelled thickness and observed depth to water (hover a point for its hole). **Bottom:** weekly thickness change at the surface (melt, negative) and at the base (growth positive, basal melt negative).
+
+Row {data-height=480}
+---------------------------------------------------------------------
+
+### Modelled vs observed (all lakes)
+
+```{r}
+lims <- range(c(fit$obs, fit$model), na.rm = TRUE)
+p <- plot_ly() |>
+  add_lines(x = lims, y = lims, name = "1:1", line = list(color = "#999999", dash = "dash", width = 1),
+            hoverinfo = "skip", showlegend = FALSE)
+for (k in unique(fit$lake_key)) {
+  p <- p |>
+    add_markers(data = dplyr::filter(fit, lake_key == k), x = ~obs, y = ~model, name = lake_name[[k]],
+                marker = list(color = lake_cols[[k]], size = 8, opacity = 0.85,
+                              line = list(color = "white", width = 1)),
+                text = ~format(day, "%Y-%m-%d"),
+                hovertemplate = "%{text}<br>Observed %{x:.2f} m<br>Model %{y:.2f} m<extra>%{fullData.name}</extra>")
+}
+p |> finish(xaxis = ax_x("Observed depth to water (m)"), yaxis = ax_y("Modelled thickness (m)"))
+```
+
+### Model error through time
+
+```{r}
+p <- plot_ly()
+for (k in unique(fit$lake_key)) {
+  p <- p |>
+    add_markers(data = dplyr::filter(fit, lake_key == k), x = ~day, y = ~resid, name = lake_name[[k]],
+                marker = list(color = lake_cols[[k]], size = 8, opacity = 0.85,
+                              line = list(color = "white", width = 1)),
+                hovertemplate = "%{x|%Y-%m-%d}<br>Model − observed %{y:+.2f} m<extra>%{fullData.name}</extra>")
+}
+p |> finish(xaxis = ax_x(), yaxis = ax_y("Model − observed (m)", zeroline = TRUE, zerolinecolor = "#888888"),
+            shapes = list(list(type = "line", xref = "x", yref = "paper", y0 = 0, y1 = 1,
+                               x0 = as.Date("2021-07-01"), x1 = as.Date("2021-07-01"),
+                               line = list(color = "#bbbbbb", dash = "dot"))))
+```
+
+Row {data-height=560}
+---------------------------------------------------------------------
+
+```{r meas-prep}
+ice_raw <- readr::read_csv(file.path(path, "Data/mcmlter-lake-ice_thickness-20250218_0_2025.csv"),
+                           show_col_types = FALSE)
+meas <- purrr::map_dfr(dv_keys, function(key) {
+  cfg <- LAKE_CONFIGS[[key]]
+  d <- dplyr::filter(ice_raw, location_name == cfg$lake_name)
+  if (is.function(cfg$ice_loc_filter)) d <- cfg$ice_loc_filter(d)
+  d <- exclude_ice_holes(d)
+  rng <- range(dplyr::filter(daily, lake_key == key)$day)
+  d |>
+    dplyr::transmute(lake_key = key,
+                     day     = as.Date(lubridate::parse_date_time(date_time, c("mdy HM", "mdy HMS", "mdy"))),
+                     hole    = trimws(location),
+                     z_water = abs(as.numeric(z_water_m)),
+                     z_ice   = as.numeric(z_ice_m)) |>
+    dplyr::filter(!is.na(day), day >= rng[1], day <= rng[2])
+})
+fb_mean <- meas |>
+  dplyr::filter(!is.na(z_water), !is.na(z_ice)) |>
+  dplyr::group_by(lake_key) |>
+  dplyr::summarise(fb_mean = mean(z_ice - z_water), .groups = "drop")
+meas_long <- meas |>
+  dplyr::left_join(fb_mean, by = "lake_key") |>
+  dplyr::left_join(dplyr::select(daily, lake_key, day, model = thickness), by = c("lake_key", "day")) |>
+  dplyr::filter(!is.na(model)) |>
+  tidyr::pivot_longer(c(z_water, z_ice), names_to = "type", values_to = "obs") |>
+  dplyr::filter(!is.na(obs)) |>
+  dplyr::mutate(resid = ifelse(type == "z_ice", model + fb_mean, model) - obs,
+                type  = c(z_water = "Depth to water (z_water)",
+                          z_ice   = "Total thickness (z_ice) vs model + mean freeboard")[type])
+meas_cols <- c("Depth to water (z_water)" = "#D55E00",
+               "Total thickness (z_ice) vs model + mean freeboard" = "#009E73")
+```
+
+### Model error by measurement type (Dry Valley lakes)
+
+```{r}
+panels <- lapply(seq_along(dv_keys), function(i) {
+  k <- dv_keys[i]
+  p <- plot_ly()
+  for (t in names(meas_cols)) {
+    d <- dplyr::filter(meas_long, lake_key == k, type == t)
+    p <- p |>
+      add_markers(data = d, x = ~day, y = ~resid, name = t, legendgroup = t, showlegend = i == 1,
+                  text = ~hole, marker = list(color = meas_cols[[t]], size = 7, opacity = 0.85,
+                                              symbol = if (grepl("^Depth", t)) "circle" else "triangle-up"),
+                  hovertemplate = "%{x|%Y-%m-%d} · %{text}<br>%{y:+.2f} m<extra></extra>")
+  }
+  p |> layout(yaxis = ax_y("", zeroline = TRUE, zerolinecolor = "#888888"),
+              annotations = list(list(text = paste0("<b>", lake_name[[k]], "</b>"), x = 0, y = 1,
+                                      xref = "paper", yref = "paper", xanchor = "left", yanchor = "top",
+                                      showarrow = FALSE, font = list(size = 11))))
+})
+subplot(panels, nrows = length(panels), shareX = TRUE, margin = c(0, 0, 0.03, 0.03)) |>
+  finish(legend_y = 1.08, xaxis = ax_x(),
+         annotations = list(list(text = "Model − observed (m)", textangle = -90, x = -0.06, y = 0.5,
+                                 xref = "paper", yref = "paper", showarrow = FALSE)))
+```
+
+### Fit table
+
+```{r}
+fit_tab <- dplyr::bind_rows(
+  fit |> dplyr::mutate(type = "Depth to water"),
+  meas_long |> dplyr::filter(grepl("^Total", type)) |>
+    dplyr::mutate(lake = lake_name[lake_key], type = "Total thickness vs model + freeboard")
+) |>
+  dplyr::mutate(period = ifelse(day < as.Date("2021-07-01"), "Before Jul 2021", "Jul 2021 onward")) |>
+  dplyr::mutate(lake = factor(lake, levels = lake_name)) |>
+  dplyr::group_by(Lake = lake, Measurement = type, Period = period) |>
+  dplyr::summarise(n = dplyr::n(), `Bias (m)` = mean(resid), `RMSE (m)` = sqrt(mean(resid^2)),
+                   .groups = "drop")
+knitr::kable(fit_tab, digits = 2, format = "html",
+             table.attr = 'class="table table-sm table-hover"')
+```
+
+Energy fluxes
+=====================================================================
+
+```{r flux-stats}
+flux_long <- purrr::imap_dfr(results, function(res, key) {
+  if (!"phase" %in% names(res)) res$phase <- "ice"
+  res |>
+    dplyr::filter(phase == "ice") |>
+    dplyr::mutate(conductive_Q = -conductive_Q, month = lubridate::month(time)) |>
+    dplyr::select(month, dplyr::all_of(names(flux_vars))) |>
+    tidyr::pivot_longer(-month, names_to = "flux_key", values_to = "value") |>
+    dplyr::filter(!is.na(value)) |>
+    dplyr::mutate(lake_key = key)
+}) |>
+  dplyr::mutate(flux = factor(flux_vars[flux_key], levels = flux_vars))
+
+flux_summary <- flux_long |>
+  dplyr::group_by(lake_key, flux) |>
+  dplyr::summarise(mean_signed = mean(value), mean_abs = mean(abs(value)), .groups = "drop") |>
+  dplyr::mutate(lake = factor(lake_name[lake_key], levels = lake_name))
+flux_net <- flux_summary |>
+  dplyr::group_by(lake) |>
+  dplyr::summarise(net = sum(mean_signed), .groups = "drop")
+
+flux_monthly <- flux_long |>
+  dplyr::group_by(lake_key, flux, month) |>
+  dplyr::summarise(lo = unname(quantile(value, 0.10)), hi = unname(quantile(value, 0.90)),
+                   value = mean(value), n = dplyr::n(), .groups = "drop") |>
+  dplyr::filter(n >= 24 * 10)          # need >= 10 days of ice in that month
+```
+
+Row {data-height=40}
+---------------------------------------------------------------------
+
+All fluxes in W m⁻², ice-covered hours only. Positive adds energy to the ice surface. Net surface flux = absorbed SW + net LW + sensible + latent − Q<sub>c</sub>.
+
+Row {data-height=440}
+---------------------------------------------------------------------
+
+### How large is each flux? (mean |flux|, log scale)
+
+```{r}
+p <- plot_ly()
+for (f in flux_vars)
+  p <- p |>
+    add_bars(data = dplyr::filter(flux_summary, flux == f), x = ~lake, y = ~mean_abs, name = f,
+             marker = list(color = flux_cols[[f]]),
+             hovertemplate = "%{x}<br>%{y:.1f} W m⁻²<extra>%{fullData.name}</extra>")
+p |> finish(barmode = "group", xaxis = ax_x(), yaxis = ax_y("Mean |flux| (W m⁻²)", type = "log"))
+```
+
+### What adds and removes energy? (mean signed flux; ◆ = net)
+
+```{r}
+p <- plot_ly()
+for (f in flux_vars)
+  p <- p |>
+    add_bars(data = dplyr::filter(flux_summary, flux == f), y = ~lake, x = ~mean_signed, name = f,
+             orientation = "h", marker = list(color = flux_cols[[f]]),
+             hovertemplate = "%{y}<br>%{x:+.1f} W m⁻²<extra>%{fullData.name}</extra>")
+p |>
+  add_markers(data = flux_net, y = ~lake, x = ~net, name = "Net surface flux",
+              marker = list(symbol = "diamond", size = 12, color = "#111111",
+                            line = list(color = "white", width = 1.5)),
+              hovertemplate = "%{y}<br>Net %{x:+.1f} W m⁻²<extra></extra>") |>
+  finish(barmode = "relative", xaxis = ax_x("W m⁻²", zeroline = TRUE, zerolinecolor = "#666666"),
+         yaxis = list(title = "", autorange = "reversed"))
+```
+
+Row {.tabset data-height=480}
+---------------------------------------------------------------------
+
+```{r}
+flux_month_plot <- function(k) {
+  d <- dplyr::filter(flux_monthly, lake_key == k)
+  p <- plot_ly()
+  for (f in flux_vars) {
+    df <- dplyr::filter(d, flux == f)
+    if (nrow(df) == 0) next
+    df <- tidyr::complete(df, month = 1:12)      # gaps (open water) break the line
+    p <- p |>
+      add_ribbons(data = df, x = ~month, ymin = ~lo, ymax = ~hi, name = f, legendgroup = f,
+                  showlegend = FALSE, fillcolor = fade(flux_cols[[f]], 0.15),
+                  line = list(width = 0), hoverinfo = "skip") |>
+      add_trace(data = df, x = ~month, y = ~value, name = f, legendgroup = f,
+                type = "scatter", mode = "lines+markers",
+                line = list(color = flux_cols[[f]], width = 2), marker = list(color = flux_cols[[f]], size = 6),
+                customdata = ~cbind(lo, hi),
+                hovertemplate = "%{y:.1f} W m⁻² (10–90%%: %{customdata[0]:.0f} to %{customdata[1]:.0f})<extra>%{fullData.name}</extra>")
+  }
+  p |> finish(hovermode = "x unified", xaxis = month_axis,
+              yaxis = ax_y("W m⁻²", zeroline = TRUE, zerolinecolor = "#888888"))
+}
+```
+
+```{r, results = "asis"}
+lake_tabs("flux_month_plot")
+```
+
+Row {data-height=40}
+---------------------------------------------------------------------
+
+**Above:** monthly mean (line) and 10th–90th percentile of hourly values (band). **Below:** weekly means through the whole run (ice-covered hours); drag the slider to zoom.
+
+Row {.tabset data-height=520}
+---------------------------------------------------------------------
+
+```{r}
+flux_daily_plot <- function(k) {
+  d <- dplyr::filter(daily, lake_key == k) |>
+    dplyr::mutate(day = as.Date(lubridate::floor_date(day, "week"))) |>
+    dplyr::group_by(day) |>
+    dplyr::summarise(dplyr::across(c(dplyr::all_of(names(flux_vars)), net_flux),
+                                   ~ round(mean(.x, na.rm = TRUE), 1)), .groups = "drop") |>
+    dplyr::mutate(dplyr::across(-day, ~ ifelse(is.nan(.x), NA, .x)))
+  p <- plot_ly(d, x = ~day)
+  for (i in seq_along(flux_vars))
+    p <- p |>
+      add_lines(y = d[[names(flux_vars)[i]]], name = flux_vars[[i]],
+                line = list(color = flux_cols[[i]], width = 1),
+                hovertemplate = "%{y:.1f}<extra>%{fullData.name}</extra>")
+  p |>
+    add_lines(y = ~net_flux, name = "Net surface flux", line = list(color = "#111111", width = 1.2),
+              visible = "legendonly", hovertemplate = "%{y:.1f}<extra>Net</extra>") |>
+    finish(hovermode = "x unified", xaxis = ax_x(rangeslider = list(visible = TRUE)),
+           yaxis = ax_y("Weekly mean (W m⁻²)", zeroline = TRUE, zerolinecolor = "#888888"))
+}
+```
+
+```{r, results = "asis"}
+lake_tabs("flux_daily_plot")
+```
+
+Model inputs
+=====================================================================
+
+```{r forcing}
+forcing_vars <- c(T_air = "Air temperature (°C)", SW_in = "Incoming SW (W m⁻²)",
+                  LWR_in = "Incoming LW (W m⁻²)", LWR_out = "Outgoing LW (W m⁻²)",
+                  wind = "Wind speed (m s⁻¹)", relative_humidity = "Relative humidity (%)",
+                  pressure = "Air pressure (kPa)", albedo = "Albedo",
+                  snow_depth = "Snow on ice (cm)")
+forcing_files <- file.path(path, sprintf("Data/model_outputs/%s_forcing_daily.rds", keys))
+forcing <- purrr::map2_dfr(forcing_files[file.exists(forcing_files)], keys[file.exists(forcing_files)],
+                           ~ dplyr::mutate(readRDS(.x), lake_key = .y))
+forcing_long <- forcing |>
+  tidyr::pivot_longer(dplyr::any_of(names(forcing_vars)), names_to = "var", values_to = "value") |>
+  dplyr::filter(!is.na(value)) |>
+  dplyr::mutate(value = dplyr::case_when(var == "T_air"      ~ value - 273.15,
+                                         var == "pressure"   ~ value / 1000,
+                                         var == "snow_depth" ~ value * 100,
+                                         TRUE ~ value)) |>
+  dplyr::group_by(lake_key, var) |>
+  dplyr::filter(dplyr::n_distinct(round(value, 6)) > 1) |>      # drop constants
+  dplyr::arrange(day, .by_group = TRUE) |>
+  dplyr::mutate(smooth = zoo::rollapply(value, 30, mean, na.rm = TRUE, fill = NA,
+                                        partial = TRUE, align = "center"),
+                week = as.Date(lubridate::floor_date(day, "week"))) |>
+  # weekly means keep the page light; the 30-day running mean is computed from
+  # the daily values first, then sampled weekly
+  dplyr::group_by(lake_key, var, week) |>
+  dplyr::summarise(value = round(mean(value), 2), smooth = round(mean(smooth), 2), .groups = "drop") |>
+  dplyr::rename(day = week)
+
+forcing_plot <- function(k) {
+  d  <- dplyr::filter(forcing_long, lake_key == k)
+  vs <- intersect(names(forcing_vars), unique(d$var))
+  panels <- lapply(vs, function(v) {
+    dv <- dplyr::filter(d, var == v)
+    plot_ly(dv, x = ~day) |>
+      add_lines(y = ~value, name = "Weekly mean", legendgroup = "weekly", showlegend = v == vs[1],
+                line = list(color = "#c4c4c4", width = 0.8), hovertemplate = "%{y:.1f}<extra>weekly</extra>") |>
+      add_lines(y = ~smooth, name = "30-day mean", legendgroup = "smooth", showlegend = v == vs[1],
+                line = list(color = lake_cols[[k]], width = 1.8),
+                hovertemplate = "%{y:.1f}<extra>30-day</extra>") |>
+      layout(yaxis = ax_y(forcing_vars[[v]], titlefont = list(size = 11)))
+  })
+  subplot(panels, nrows = length(panels), shareX = TRUE, titleY = TRUE) |>
+    finish(hovermode = "x unified", legend_y = 1.04, xaxis = ax_x())
+}
+```
+
+Row {.tabset data-height=1100}
+---------------------------------------------------------------------
+
+```{r, results = "asis"}
+lake_tabs("forcing_plot", intersect(keys, unique(forcing_long$lake_key)))
+```
+
+Row {data-height=40}
+---------------------------------------------------------------------
+
+The time series each model run is driven by (after gap-filling). Grey = weekly mean, colour = 30-day running mean. Inputs that never change for a lake (e.g. a constant albedo) are left out.
+
+Row {data-height=760}
+---------------------------------------------------------------------
+
+### Monthly climatology of the inputs, all lakes
+
+```{r}
+clim <- forcing_long |>
+  dplyr::mutate(month = lubridate::month(day)) |>
+  dplyr::group_by(lake_key, var, month) |>
+  dplyr::summarise(value = mean(value), .groups = "drop")
+clim_vars <- intersect(names(forcing_vars), unique(clim$var))
+panels <- lapply(clim_vars, function(v) {
+  p <- plot_ly()
+  for (k in intersect(keys, unique(clim$lake_key))) {
+    d <- dplyr::filter(clim, var == v, lake_key == k)
+    if (nrow(d) == 0) next
+    p <- p |>
+      add_trace(data = d, x = ~month, y = ~value, type = "scatter", mode = "lines+markers",
+                name = lake_name[[k]], legendgroup = k, showlegend = v == clim_vars[1],
+                line = list(color = lake_cols[[k]], width = 1.8), marker = list(color = lake_cols[[k]], size = 5),
+                hovertemplate = paste0("%{y:.1f}<extra>", lake_name[[k]], "</extra>"))
+  }
+  p |> layout(xaxis = month_axis,
+              annotations = list(list(text = paste0("<b>", forcing_vars[[v]], "</b>"), x = 0, y = 1.02,
+                                      xref = "paper", yref = "paper", xanchor = "left", yanchor = "bottom",
+                                      showarrow = FALSE, font = list(size = 12))))
+})
+subplot(panels, nrows = ceiling(length(panels) / 2), margin = c(0.04, 0.04, 0.05, 0.05)) |>
+  finish(legend_y = 1.07)
+```
+
+Ice temperature
+=====================================================================
+
+```{r profiles}
+prof_files <- file.path(path, sprintf("Data/model_outputs/%s_thermal_profile.rds", keys))
+have_prof  <- file.exists(prof_files)
+profiles <- purrr::map2_dfr(prof_files[have_prof], keys[have_prof],
+                            ~ dplyr::mutate(readRDS(.x), lake_key = .y)) |>
+  dplyr::mutate(depth = round(depth / CONSTANTS$dx) * CONSTANTS$dx,
+                month = lubridate::month(time),
+                nh_month = ifelse(lake_key %in% dv_keys, (month + 5) %% 12 + 1, month),
+                season = factor(c("Winter", "Winter", "Spring", "Spring", "Spring", "Summer", "Summer",
+                                  "Summer", "Autumn", "Autumn", "Autumn", "Winter")[nh_month],
+                                levels = c("Winter", "Spring", "Summer", "Autumn")))
+season_cols <- c(Winter = "#0072B2", Spring = "#009E73", Summer = "#E69F00", Autumn = "#CC79A7")
+
+prof_week <- profiles |>
+  dplyr::mutate(week = as.Date(lubridate::floor_date(time, "week"))) |>
+  dplyr::group_by(lake_key, week, depth) |>
+  dplyr::summarise(temp_C = round(mean(temp_C), 2), .groups = "drop")
+temp_range <- range(prof_week$temp_C, na.rm = TRUE)
+
+profile_heatmap <- function(k) {
+  d <- dplyr::filter(prof_week, lake_key == k)
+  plot_ly(d, x = ~week, y = ~depth, z = ~temp_C, type = "heatmap",
+          colorscale = "Viridis", zmin = temp_range[1], zmax = 0,
+          colorbar = list(title = "°C", len = 0.9),
+          hovertemplate = "Week of %{x|%Y-%m-%d}<br>%{y:.1f} m below surface<br>%{z:.1f} °C<extra></extra>") |>
+    finish(xaxis = ax_x(), yaxis = ax_y("Depth below ice surface (m)", autorange = "reversed"))
+}
+```
+
+Row {.tabset data-height=540}
+---------------------------------------------------------------------
+
+```{r, results = "asis"}
+lake_tabs("profile_heatmap", keys[have_prof])
+```
+
+Row {data-height=40}
+---------------------------------------------------------------------
+
+Weekly mean of the modelled daily profiles. The lower edge of the colour is the ice base; gaps at the Rockies lakes are open water. Below: seasonal mean profile (line) with 10th–90th percentile band, seasons in each lake's own hemisphere.
+
+Row {data-height=620}
+---------------------------------------------------------------------
+
+### Seasonal mean temperature profiles
+
+```{r}
+prof_season <- profiles |>
+  dplyr::group_by(lake_key, season, depth) |>
+  dplyr::summarise(lo = unname(quantile(temp_C, 0.1)), hi = unname(quantile(temp_C, 0.9)),
+                   temp = mean(temp_C), n = dplyr::n(), .groups = "drop") |>
+  dplyr::filter(n >= 20)
+pk <- intersect(keys, unique(prof_season$lake_key))
+panels <- lapply(pk, function(k) {
+  p <- plot_ly()
+  for (s in levels(prof_season$season)) {
+    d <- dplyr::filter(prof_season, lake_key == k, season == s)
+    if (nrow(d) == 0) next
+    p <- p |>
+      add_trace(data = d, x = ~lo, y = ~depth, type = "scatter", mode = "lines",
+                line = list(width = 0), legendgroup = s, showlegend = FALSE, hoverinfo = "skip") |>
+      add_trace(data = d, x = ~hi, y = ~depth, type = "scatter", mode = "lines", fill = "tonextx",
+                fillcolor = fade(season_cols[[s]], 0.15), line = list(width = 0),
+                legendgroup = s, showlegend = FALSE, hoverinfo = "skip") |>
+      add_trace(data = d, x = ~temp, y = ~depth, type = "scatter", mode = "lines", name = s,
+                legendgroup = s, showlegend = k == pk[1], line = list(color = season_cols[[s]], width = 2),
+                hovertemplate = paste0("%{y:.1f} m: %{x:.1f} °C<extra>", s, "</extra>"))
+  }
+  p |> layout(yaxis = list(autorange = "reversed"),
+              annotations = list(list(text = paste0("<b>", lake_name[[k]], "</b>"), x = 0, y = 1.02,
+                                      xref = "paper", yref = "paper", xanchor = "left", yanchor = "bottom",
+                                      showarrow = FALSE)))
+})
+subplot(panels, nrows = 2, margin = c(0.03, 0.03, 0.07, 0.05)) |>
+  finish(legend_y = 1.08)
+```
+
+Albedo & lake levels
+=====================================================================
+
+```{r albedo}
+alb_files <- list.files(file.path(path, "Data/model_outputs/albedo_comparison"),
+                        pattern = "_(bb|wholelake)_output\\.csv$", full.names = TRUE)
+has_alb <- length(alb_files) > 0
+alb_src <- c(bb = "Blue box", wholelake = "Whole lake")
+alb_cols <- c("Blue box" = "#0072B2", "Whole lake" = "#E69F00")
+if (has_alb) {
+  alb_daily <- purrr::map_dfr(alb_files, readr::read_csv, show_col_types = FALSE) |>
+    dplyr::mutate(day = as.Date(time)) |>
+    dplyr::group_by(lake_key, albedo_source, day) |>
+    dplyr::summarise(thickness = round(mean(thickness), 3), albedo = round(mean(albedo), 3),
+                     .groups = "drop") |>
+    dplyr::mutate(source = alb_src[albedo_source])
+}
+alb_panels <- function(column, ytitle, summer_only = FALSE) {
+  ks <- intersect(dv_keys, unique(alb_daily$lake_key))
+  panels <- lapply(ks, function(k) {
+    p <- plot_ly()
+    for (s in alb_src) {
+      d <- dplyr::filter(alb_daily, lake_key == k, source == s)
+      if (summer_only) d <- dplyr::filter(d, lubridate::month(day) %in% c(10:12, 1:2))
+      ht <- paste0("%{x|%Y-%m-%d}: %{y:.2f}<extra>", s, "</extra>")
+      p <- if (summer_only) {
+        add_markers(p, data = d, x = ~day, y = d[[column]], name = s, legendgroup = s,
+                    showlegend = k == ks[1], marker = list(color = alb_cols[[s]], size = 3),
+                    hovertemplate = ht)
+      } else {
+        add_lines(p, data = d, x = ~day, y = d[[column]], name = s, legendgroup = s,
+                  showlegend = k == ks[1], line = list(color = alb_cols[[s]], width = 1.5),
+                  hovertemplate = ht)
+      }
+    }
+    if (column == "thickness") {
+      o <- dplyr::filter(obs_all, lake_key == k)
+      p <- p |> add_markers(data = o, x = ~day, y = ~obs, name = "Observed", legendgroup = "obs",
+                            showlegend = k == ks[1], marker = list(color = "#222222", size = 6),
+                            hovertemplate = "%{x|%Y-%m-%d}: %{y:.2f} m<extra>Observed</extra>")
+    }
+    p |> layout(yaxis = ax_y(lake_name[[k]]))
+  })
+  subplot(panels, nrows = length(panels), shareX = TRUE, titleY = TRUE) |>
+    finish(legend_y = 1.06, xaxis = ax_x())
+}
+```
+
+Row {data-height=40}
+---------------------------------------------------------------------
+
+`r if (has_alb) "Model runs identical except for the albedo forcing: blue-box pixel (albedo.predict.bb, the default) vs whole-lake mean (albedo.predict.wholelake). Created by R/Compare_Albedo_Sources.R." else "**No albedo comparison runs found.** Run R/Compare_Albedo_Sources.R (or knit the report with rerun_albedo_comparison: true) and re-knit this dashboard."`
+
+Row {data-height=640}
+---------------------------------------------------------------------
+
+### Modelled ice thickness with each albedo source
+
+```{r}
+if (has_alb) alb_panels("thickness")
+```
+
+### Albedo forcing (Oct–Feb)
+
+```{r}
+if (has_alb) alb_panels("albedo", summer_only = TRUE)
+```
+
+Row {data-height=460}
+---------------------------------------------------------------------
+
+### Surveyed lake levels
+
+```{r}
+lvl_file <- file.path(path, "Data/mcmlter-lake-levels-20260318.csv")
+if (file.exists(lvl_file)) {
+  level_lakes <- c("East Lake Bonney" = "Lake Bonney", "Lake Hoare" = "Lake Hoare",
+                   "Lake Fryxell" = "Lake Fryxell")
+  level_cols  <- c("Lake Bonney" = "#0072B2", "Lake Hoare" = "#009E73", "Lake Fryxell" = "#CC79A7")
+  lv <- readr::read_csv(lvl_file, show_col_types = FALSE) |>
+    dplyr::filter(location_name %in% names(level_lakes)) |>
+    dplyr::mutate(date = as.Date(date_surveyed), lake = level_lakes[location_name],
+                  level = as.numeric(lake_level_masl)) |>
+    dplyr::filter(!is.na(level), date >= as.Date("2012-10-01")) |>
+    dplyr::arrange(date)
+  panels <- lapply(unname(level_lakes), function(l) {
+    d <- dplyr::filter(lv, lake == l)
+    plot_ly(d, x = ~date, y = ~level, type = "scatter", mode = "lines+markers", name = l,
+            line = list(color = level_cols[[l]], width = 1.2), marker = list(color = level_cols[[l]], size = 6),
+            hovertemplate = "%{x|%Y-%m-%d}: %{y:.2f} m asl<extra>%{fullData.name}</extra>") |>
+      layout(yaxis = ax_y(l))
+  })
+  subplot(panels, nrows = 1, titleY = TRUE, margin = 0.05) |> finish(showlegend = FALSE)
+}
+```

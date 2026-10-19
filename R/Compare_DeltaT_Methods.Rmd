@@ -1,0 +1,437 @@
+---
+title: "Comparing ΔT methods for the sensible heat flux"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+params:
+  # TRUE  = run the ice model for every lake x method below and save the output
+  #         to Data/model_outputs/deltaT_comparison/ (several model runs per lake;
+  #         "energy_balance" is the slowest).
+  # FALSE = skip the runs and plot the outputs already saved there.
+  rerun: true
+  lakes: ["WLB", "ELB", "LH", "LF", "GL4", "LOC"]
+  # Any of run_ice_model()'s delta_T_method choices
+  methods: ["lag", "ashton", "lwr_out", "energy_balance"]
+---
+
+```{r setup, include = FALSE}
+# Repository root. Every path below is built from it with file.path(), so the
+# chunks work both when knitting and when run one at a time in RStudio.
+path <- path.expand("~/Library/CloudStorage/OneDrive-UCB-O365/Documents/R-Repositories/TVLakes_IceModel")
+if (!dir.exists(path)) stop("Repository folder not found: ", path)
+# Every plot is also saved as a PNG in figures/Compare_DeltaT_Methods/,
+# named after the chunk that makes it (300 dpi).
+fig_dir <- file.path(path, "figures", "Compare_DeltaT_Methods")
+dir.create(fig_dir, showWarnings = FALSE, recursive = TRUE)
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE,
+                      fig.width = 10, fig.height = 7,
+                      dev = "png", dpi = 150, fig.retina = 2,
+                      fig.path = paste0(fig_dir, "/deltaT-"))
+```
+
+```{r libraries}
+source(file.path(path, "R/functions/libraries.R"))
+source(file.path(path, "R/functions/functions.R"))
+```
+
+The sensible heat flux in `run_ice_model()` is
+
+*Q~h~ = ρ~air~ · C~a~ · C~h~ · U · ΔT*
+
+where ΔT is the difference between the air and ice-surface temperatures. The
+model does not track a separate surface temperature (its top node is held at
+the air temperature), so ΔT has to be estimated. This report runs every lake
+once per method, **changing nothing but ΔT**, and compares the results.
+
+```{r methods}
+method_info <- tibble::tribble(
+  ~method,          ~label,             ~surface_temp,                                                       ~colour,
+  "lag",            "Lag (original)",   "T_s = previous hour's T_air, so ΔT = T_air(t) − T_air(t−1)",        "#555555",
+  "ashton",         "Ashton",           "T_s where conduction through the ice balances air–surface exchange", "#0072B2",
+  "lwr_out",        "LWR_out",          "T_s = (LWR_out / εσ)^¼, capped at 0 °C",                             "#E69F00",
+  "energy_balance", "Energy balance",   "T_s solved from the full surface energy balance, capped at 0 °C",    "#009E73"
+) |>
+  dplyr::filter(method %in% params$methods)
+methods       <- method_info$method
+method_labels <- setNames(method_info$label, method_info$method)
+method_cols   <- setNames(method_info$colour, method_info$label)
+
+method_info |>
+  dplyr::transmute(`delta_T_method` = paste0("<code>", method, "</code>"),
+                   Label = label, `Surface temperature (ΔT = T_air − T_s)` = surface_temp) |>
+  knitr::kable(escape = FALSE)
+```
+
+Only Q~h~ changes directly. The heat-conduction boundary (top node = T~air~),
+the conductive flux Q~c~ and the outgoing longwave are the same for every
+method, and the open-water phase at the Rockies lakes is unchanged
+(ΔT = T~air~ − T~water~). Every other difference below is a knock-on effect of
+Q~h~ through melt and ice thickness.
+
+```{r lakes}
+lake_files <- tibble::tribble(
+  ~lake_key, ~region,
+  "WLB", "McMurdo Dry Valleys", "ELB", "McMurdo Dry Valleys",
+  "LH",  "McMurdo Dry Valleys", "LF",  "McMurdo Dry Valleys",
+  "GL4", "Colorado Rockies",    "LOC", "Colorado Rockies"
+) |>
+  dplyr::filter(lake_key %in% params$lakes)
+keys        <- lake_files$lake_key
+lake_name   <- purrr::map_chr(LAKE_CONFIGS[keys], "lake_name")
+lake_levels <- unname(lake_name)
+out_dir     <- file.path(path, "Data/model_outputs/deltaT_comparison")
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+out_file    <- function(key, method) file.path(out_dir, sprintf("%s_%s_output.csv", key, method))
+```
+
+## Model runs
+
+```{r run, eval = isTRUE(params$rerun)}
+keep_cols <- c("time", "thickness", "SW_abs", "LW_net", "sensible_Q", "latent_Q",
+               "conductive_Q", "surface_heat_flux", "surface_loss", "bottom_gain",
+               "delta_T", "T_surface", "phase")
+
+run_lake <- function(key) {
+  old_wd <- setwd(path)                 # the 00_ scripts use repo-relative paths
+  on.exit(setwd(old_wd), add = TRUE)
+  prep <- new.env(parent = globalenv())
+  ok <- tryCatch({
+    source(sprintf("R/%s/00_%s_data_preparation.R", key, key), local = prep)
+    TRUE
+  }, error = function(e) conditionMessage(e))
+  if (!isTRUE(ok))
+    return(tibble::tibble(lake_key = key, method = methods,
+                          status = paste("FAILED (data prep):", ok), minutes = NA_real_))
+
+  ts_ready <- prepare_model_input(prep$inputs$time_series, warming_rate = 0,
+                                  constants = lake_constants(key))
+  purrr::map_dfr(methods, function(m) {
+    message(sprintf("%s: delta_T_method = '%s'", key, m))
+    t0  <- Sys.time()
+    res <- tryCatch(run_ice_model(ts_ready, constants = lake_constants(key),
+                                  show_progress = FALSE, delta_T_method = m),
+                    error = function(e) conditionMessage(e))
+    mins <- round(as.numeric(difftime(Sys.time(), t0, units = "mins")), 1)
+    if (is.character(res))
+      return(tibble::tibble(lake_key = key, method = m, status = paste("FAILED:", res), minutes = mins))
+    out <- dplyr::select(res, dplyr::any_of(keep_cols))
+    # forcing alongside the output, for the surface-temperature checks below
+    forc <- dplyr::select(ts_ready, time, T_air, LWR_out_input = LWR_out)
+    out  <- if (nrow(out) == nrow(forc) && all(out$time == forc$time))
+      dplyr::bind_cols(out, dplyr::select(forc, -time))
+    else dplyr::left_join(out, forc, by = "time")
+    readr::write_csv(dplyr::mutate(out, method = m, lake_key = key), out_file(key, m))
+    tibble::tibble(lake_key = key, method = m, status = "OK", minutes = mins)
+  })
+}
+
+run_log <- purrr::map_dfr(keys, run_lake)
+```
+
+```{r run-status, eval = isTRUE(params$rerun)}
+run_log |>
+  dplyr::transmute(Lake = lake_name[lake_key], Method = method_labels[method],
+                   Status = status, `Run time (min)` = minutes) |>
+  knitr::kable()
+```
+
+```{r load}
+files <- tidyr::expand_grid(lake_key = keys, method = methods) |>
+  dplyr::mutate(file = out_file(lake_key, method)) |>
+  dplyr::filter(file.exists(file))
+missing <- tidyr::expand_grid(lake_key = keys, method = methods) |>
+  dplyr::anti_join(files, by = c("lake_key", "method"))
+
+runs <- purrr::map(files$file, readr::read_csv, show_col_types = FALSE) |>
+  purrr::map(function(d) { if (!"phase" %in% names(d)) d$phase <- "ice"; d }) |>
+  dplyr::bind_rows() |>
+  dplyr::mutate(lake  = factor(lake_name[lake_key], levels = lake_levels),
+                label = factor(method_labels[method], levels = method_info$label),
+                on_ice = phase == "ice" & thickness > 0)
+has_runs <- nrow(runs) > 0
+
+if (has_runs) {
+  daily <- runs |>
+    dplyr::mutate(day = as.Date(time)) |>
+    dplyr::group_by(lake_key, lake, method, label, day) |>
+    dplyr::summarise(thickness    = mean(thickness),
+                     surface_loss = sum(surface_loss),
+                     bottom_gain  = sum(bottom_gain),
+                     .groups = "drop")
+
+  obs <- purrr::map_dfr(unique(runs$lake_key), function(key) {
+    o <- load_ice_observations(key, project_path = path,
+                               time_range = range(runs$time[runs$lake_key == key]))
+    if (is.null(o) || nrow(o) == 0) return(NULL)
+    tibble::tibble(lake_key = key, day = as.Date(o$date_time), obs = abs(o$z_water_m))
+  })
+  if (nrow(obs) > 0) obs$lake <- factor(lake_name[obs$lake_key], levels = lake_levels)
+}
+
+base_theme <- theme_minimal(base_size = 12) +
+  theme(strip.text = element_text(face = "bold", hjust = 0),
+        panel.grid.minor = element_blank(), legend.position = "top")
+scale_method <- scale_colour_manual(values = method_cols, name = NULL, drop = TRUE)
+```
+
+`r if (!has_runs) "**No ΔT comparison runs found.** Knit with <code>rerun: true</code> to create them." else if (nrow(missing) > 0) sprintf("**Missing runs:** %s. Knit with <code>rerun: true</code> to create them.", paste(lake_name[missing$lake_key], method_labels[missing$method], sep = " / ", collapse = "; ")) else ""`
+
+## Ice thickness
+
+```{r thickness, fig.height = 12, eval = has_runs}
+ggplot(daily, aes(day, thickness, colour = label)) +
+  geom_line(linewidth = 0.5) +
+  { if (nrow(obs) > 0) geom_point(data = obs, aes(day, obs), inherit.aes = FALSE,
+                                  colour = "#D6604D", size = 1.4) } +
+  scale_method +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  facet_wrap(~ lake, ncol = 1, scales = "free_y") +
+  labs(x = NULL, y = "Ice thickness (m)",
+       title = "Modelled ice thickness with each ΔT method",
+       subtitle = "Daily mean; red points = observed depth to water") +
+  base_theme
+```
+
+```{r thickness-diff, fig.height = 8, eval = has_runs && "lag" %in% methods && length(methods) > 1}
+thick_diff <- daily |>
+  dplyr::select(lake, day, method, label, thickness) |>
+  dplyr::left_join(daily |> dplyr::filter(method == "lag") |>
+                     dplyr::select(lake, day, lag = thickness),
+                   by = c("lake", "day")) |>
+  dplyr::filter(method != "lag") |>
+  dplyr::mutate(diff = thickness - lag)
+
+ggplot(thick_diff, aes(day, diff, colour = label)) +
+  geom_hline(yintercept = 0, colour = "grey50") +
+  geom_line(linewidth = 0.5) +
+  scale_method +
+  scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
+  facet_wrap(~ lake, ncol = 2, scales = "free_y") +
+  labs(x = NULL, y = "Difference from lag method (m)",
+       title = "How much each method changes the modelled thickness",
+       subtitle = "Positive = thicker ice than the original (lag) method") +
+  base_theme
+```
+
+### Fit to observations
+
+```{r fit-table, eval = has_runs && nrow(obs) > 0}
+fit <- obs |>
+  dplyr::inner_join(dplyr::select(daily, lake_key, day, method, label, model = thickness),
+                    by = c("lake_key", "day")) |>
+  dplyr::mutate(resid  = model - obs,
+                period = ifelse(day < as.Date("2021-07-01"), "Before Jul 2021", "Jul 2021 onward"))
+cell <- function(d) dplyr::summarise(d, cell = sprintf("%+.2f / %.2f", mean(resid), sqrt(mean(resid^2))),
+                                     rmse = sqrt(mean(resid^2)), n = dplyr::n(), .groups = "drop")
+fit_tab <- dplyr::bind_rows(
+  fit |> dplyr::group_by(lake, label, period) |> cell(),
+  fit |> dplyr::group_by(lake, label) |> cell() |> dplyr::mutate(period = "All")
+) |>
+  dplyr::group_by(lake, period) |>
+  dplyr::mutate(cell = ifelse(rmse == min(rmse), paste0("**", cell, "**"), cell)) |>
+  dplyr::ungroup()
+fit_tab |>
+  dplyr::mutate(period = factor(period, levels = c("Before Jul 2021", "Jul 2021 onward", "All"))) |>
+  dplyr::select(Lake = lake, period, Method = label, cell) |>
+  tidyr::pivot_wider(names_from = period, values_from = cell) |>
+  dplyr::arrange(Lake, Method) |>
+  knitr::kable(caption = "Model − observed depth to water: bias / RMSE (m). Bold = lowest RMSE for that lake and period.")
+```
+
+## ΔT and surface temperature
+
+Monthly means over ice-covered hours. The original (lag) ΔT averages to
+almost zero, because it is just the hour-to-hour change in air temperature.
+The other methods give a real air-minus-surface difference: negative when the
+surface is warmer than the air (heat flows from the ice to the air), positive
+when the air is warmer.
+
+```{r monthly}
+monthly <- if (has_runs) runs |>
+  dplyr::filter(on_ice) |>
+  dplyr::mutate(month = lubridate::month(time)) |>
+  dplyr::group_by(lake, lake_key, label, month) |>
+  dplyr::summarise(delta_T    = mean(delta_T, na.rm = TRUE),
+                   T_surface  = mean(T_surface, na.rm = TRUE) - 273.15,
+                   T_air      = mean(T_air, na.rm = TRUE) - 273.15,
+                   sensible_Q = mean(sensible_Q, na.rm = TRUE),
+                   n = dplyr::n(), .groups = "drop") |>
+  dplyr::filter(n >= 24 * 10)
+month_axis <- scale_x_continuous(breaks = 1:12, labels = substr(month.abb, 1, 1))
+```
+
+```{r delta-T, fig.height = 7, eval = has_runs}
+ggplot(monthly, aes(month, delta_T, colour = label)) +
+  geom_hline(yintercept = 0, colour = "grey50") +
+  geom_line(linewidth = 0.7) + geom_point(size = 1.4) +
+  scale_method + month_axis +
+  facet_wrap(~ lake, ncol = 3) +
+  labs(x = NULL, y = "ΔT = T_air − T_s (K)", title = "Monthly mean ΔT") +
+  base_theme
+```
+
+```{r surface-temp, fig.height = 7, eval = has_runs}
+air_line <- monthly |> dplyr::distinct(lake, month, T_air)
+ggplot(monthly, aes(month, T_surface, colour = label)) +
+  geom_line(data = air_line, aes(month, T_air), inherit.aes = FALSE,
+            colour = "grey30", linetype = "22", linewidth = 0.6) +
+  geom_line(linewidth = 0.7) + geom_point(size = 1.4) +
+  scale_method + month_axis +
+  facet_wrap(~ lake, ncol = 3, scales = "free_y") +
+  labs(x = NULL, y = "°C", title = "Monthly mean surface temperature used for ΔT",
+       subtitle = "Dashed grey = air temperature") +
+  base_theme
+```
+
+### Check against measured outgoing longwave (Dry Valley lakes)
+
+At the Dry Valley lakes the outgoing longwave comes from the COHM station, so
+it gives an independent surface-temperature estimate,
+T~s~ = (LWR~out~ / εσ)^¼. COHM is on Commonwealth Glacier, not on the lakes,
+so this is a check on the seasonal pattern and size of T~s~, not an exact
+target. (The `lwr_out` method uses this estimate directly, so it matches by
+construction. At the Rockies lakes LWR~out~ is a constant, so this check is
+skipped there.)
+
+```{r lw-check, eval = has_runs && any(c("WLB", "ELB", "LH", "LF") %in% runs$lake_key)}
+eps <- CONSTANTS$emissivity; sig <- CONSTANTS$sigma
+lw_check <- runs |>
+  dplyr::filter(on_ice, lake_key %in% c("WLB", "ELB", "LH", "LF"), !is.na(T_surface),
+                !is.na(LWR_out_input)) |>
+  dplyr::mutate(T_s_lw = pmin((LWR_out_input / (eps * sig))^0.25, 273.15),
+                err = T_surface - T_s_lw)
+lw_check |>
+  dplyr::group_by(Lake = lake, Method = label) |>
+  dplyr::summarise(`Bias (K)` = mean(err), `RMSE (K)` = sqrt(mean(err^2)),
+                   `r (hourly)` = stats::cor(T_surface, T_s_lw), .groups = "drop") |>
+  knitr::kable(digits = 2, caption = "Modelled surface temperature vs the LWR_out estimate (hourly, ice-covered)")
+```
+
+## Sensible heat flux
+
+```{r Qh-monthly, fig.height = 7, eval = has_runs}
+ggplot(monthly, aes(month, sensible_Q, colour = label)) +
+  geom_hline(yintercept = 0, colour = "grey50") +
+  geom_line(linewidth = 0.7) + geom_point(size = 1.4) +
+  scale_method + month_axis +
+  facet_wrap(~ lake, ncol = 3) +
+  labs(x = NULL, y = "Q_h (W m⁻²)", title = "Monthly mean sensible heat flux",
+       subtitle = "Positive = heat into the ice surface") +
+  base_theme
+```
+
+```{r budget, fig.height = 7, eval = has_runs}
+flux_vars <- c(SW_abs = "Absorbed shortwave", LW_net = "Net longwave",
+               sensible_Q = "Sensible heat", latent_Q = "Latent heat",
+               conductive_Q = "Conductive (−Qc)")
+flux_cols <- setNames(c("#E69F00", "#0072B2", "#D55E00", "#009E73", "#CC79A7"), flux_vars)
+budget <- runs |>
+  dplyr::filter(on_ice) |>
+  dplyr::mutate(conductive_Q = -conductive_Q) |>
+  dplyr::group_by(lake, label) |>
+  dplyr::summarise(dplyr::across(dplyr::all_of(names(flux_vars)), ~ mean(.x, na.rm = TRUE)),
+                   net = mean(surface_heat_flux, na.rm = TRUE), .groups = "drop")
+budget_long <- budget |>
+  tidyr::pivot_longer(dplyr::all_of(names(flux_vars)), names_to = "flux", values_to = "value") |>
+  dplyr::mutate(flux = factor(flux_vars[flux], levels = flux_vars))
+
+ggplot(budget_long, aes(value, label, fill = flux)) +
+  geom_col(width = 0.7) +
+  geom_vline(xintercept = 0, colour = "grey30") +
+  geom_point(data = budget, aes(net, label), inherit.aes = FALSE,
+             shape = 23, size = 2.8, fill = "black", colour = "white") +
+  scale_fill_manual(values = flux_cols, name = NULL) +
+  scale_y_discrete(limits = rev) +
+  facet_wrap(~ lake, ncol = 2) +
+  labs(x = "Mean flux over ice-covered hours (W m⁻²)", y = NULL,
+       title = "Surface energy budget with each ΔT method",
+       subtitle = "Diamond = mean net surface flux") +
+  base_theme
+```
+
+```{r Qh-table, eval = has_runs}
+runs |>
+  dplyr::filter(on_ice) |>
+  dplyr::group_by(Lake = lake, Method = label) |>
+  dplyr::summarise(`Mean ΔT (K)`   = mean(delta_T, na.rm = TRUE),
+                   `Mean Qh`       = mean(sensible_Q, na.rm = TRUE),
+                   `Mean |Qh|`     = mean(abs(sensible_Q), na.rm = TRUE),
+                   `Qh 5th pct`    = unname(stats::quantile(sensible_Q, 0.05, na.rm = TRUE)),
+                   `Qh 95th pct`   = unname(stats::quantile(sensible_Q, 0.95, na.rm = TRUE)),
+                   .groups = "drop") |>
+  knitr::kable(digits = 1, caption = "Sensible heat flux over ice-covered hours (W m⁻²)")
+```
+
+## Surface melt and bottom growth
+
+Totals per ice year (July–June, labelled by the year it ends in).
+
+```{r mass-balance, fig.height = 9, eval = has_runs}
+mb <- daily |>
+  dplyr::mutate(ice_year = lubridate::year(day) + (lubridate::month(day) >= 7)) |>
+  dplyr::group_by(lake, label, ice_year) |>
+  dplyr::summarise(`Surface melt` = -sum(surface_loss), `Bottom growth` = sum(bottom_gain),
+                   days = dplyr::n(), .groups = "drop") |>
+  dplyr::filter(days >= 300) |>                       # complete ice years only
+  tidyr::pivot_longer(c(`Surface melt`, `Bottom growth`), names_to = "term", values_to = "m")
+
+ggplot(mb, aes(factor(ice_year), m, fill = label)) +
+  geom_hline(yintercept = 0, colour = "grey40") +
+  geom_col(position = position_dodge(width = 0.8), width = 0.75,
+           data = dplyr::filter(mb, term == "Bottom growth")) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.75,
+           data = dplyr::filter(mb, term == "Surface melt")) +
+  scale_fill_manual(values = method_cols, name = NULL) +
+  facet_wrap(~ lake, ncol = 2, scales = "free") +
+  labs(x = "Ice year", y = "m per ice year",
+       title = "Annual bottom growth (up) and surface melt (down)") +
+  base_theme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r mb-table, eval = has_runs}
+mb |>
+  dplyr::group_by(Lake = lake, Method = label, term) |>
+  dplyr::summarise(m = mean(m), .groups = "drop") |>
+  tidyr::pivot_wider(names_from = term, values_from = m) |>
+  dplyr::mutate(`Net (m/yr)` = `Bottom growth` + `Surface melt`) |>
+  dplyr::rename(`Bottom growth (m/yr)` = `Bottom growth`, `Surface melt (m/yr)` = `Surface melt`) |>
+  knitr::kable(digits = 2, caption = "Mean per complete ice year")
+```
+
+## Notes
+
+- **Why the Ashton, LWR_out and energy-balance runs can give almost the same
+  thickness.** The model only acts on the net surface flux when it is
+  positive (surface melt); a negative net flux is discarded, and bottom growth
+  depends on the air-temperature-pinned profile, not on Q~h~. So winter
+  differences in Q~h~ never reach the ice thickness. During melt, all three
+  methods cap T~s~ at 0 °C, so they share the same ΔT = T~air~ − 0 °C and the
+  same melt. The lag method is the odd one out because its ΔT is near zero
+  during melt too.
+- **What differs between methods.** Only ΔT, and so Q~h~, in the ice phase.
+  The ice's top node is still set to the air temperature in every run, so the
+  conductive flux Q~c~ and the temperature profile respond to T~air~, not to
+  the T~s~ each method estimates.
+- **Ashton.** T~s~ comes from balancing conduction through the whole ice
+  thickness against air–surface exchange (H = ρ~air~ C~a~ C~h~ U), with no
+  radiation. Thick ice conducts little, so T~s~ sits close to T~air~ and ΔT
+  stays small.
+- **LWR_out.** Uses the measured COHM outgoing longwave at the Dry Valley
+  lakes. At the Rockies lakes LWR~out~ is a constant (εσT~f~⁴), so T~s~ = 0 °C
+  and ΔT = T~air~ − 0 °C, which overstates winter heat loss.
+- **Energy balance.** Solves for T~s~ each hour from shortwave, longwave,
+  sensible, latent and conduction (linear profile to 0 °C at the ice base),
+  with T~s~ capped at 0 °C.
+- Raw outputs are in `Data/model_outputs/deltaT_comparison/`.
+
+```{r chi-table}
+# Lake settings these runs used (from lake_constants(), so they reflect the
+# current R/functions/functions.R)
+tibble::tibble(Lake = lake_name,
+               `Chi (fraction of SW not absorbed at the surface)` =
+                 purrr::map_dbl(keys, ~ lake_constants(.x)$Chi),
+               `Ch (sensible transfer coeff.)` = purrr::map_dbl(keys, ~ lake_constants(.x)$Ch)) |>
+  knitr::kable(caption = "Settings used by every run in this report")
+```

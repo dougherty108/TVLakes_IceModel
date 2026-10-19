@@ -25,7 +25,25 @@ CONSTANTS <- list(
   # Bulk transfer
   Ch         = 1.3e-3,    # sensible heat transfer coefficient
   Ce         = 1.3e-3,    # latent heat transfer coefficient
-  Chi        = 0.43,      # fraction of SW absorbed at surface
+  #Chi        = 0.43,      # fraction of SW absorbed at surface
+
+  # Shortwave penetration into the ice (Beer–Lambert) — see run_ice_model().
+  # Off by default, so runs are unchanged until you switch it on. When on, it
+  # replaces Chi for the ice phase: (1 - i0) of the net shortwave is absorbed at
+  # the surface and the rest decays with depth as exp(-kappa_ice * z), warming
+  # (and, at 0 °C, melting) the ice interior, with anything left at the ice base
+  # passing into the lake.
+  sw_penetration = TRUE,
+  i0             = 0.20,      # fraction of net SW that passes below the surface layer
+                              # (~0.3 white/bubbly ice to ~0.6+ clear ice; starting value)
+  kappa_ice      = 1.0,       # bulk extinction coefficient of the ice (m^-1; starting value)
+  retain_meltwater = TRUE,    # TRUE = interior melt from penetrating SW stays in the ice
+                              # as liquid water and refreezes when the ice cools (only a
+                              # layer wetter than phi_max drains); FALSE = it is lost at
+                              # once (the ice thins straight away)
+  phi_max        = 0.30,      # liquid fraction above which a layer drains (0–1)
+  sw_to_base     = 0.0,       # fraction of SW transmitted through the ice base that melts
+                              # the base; the rest heats the lake (0 = all to the lake)
 
   # Model grid
   dx         = 0.1,       # spatial step (m)
@@ -93,7 +111,8 @@ LAKE_CONFIGS <- list(
   ELB = list(
     lake_name        = "East Lake Bonney",
     L_initial        = 3.88,   # ice-to-ice thickness on 2016-12-17
-    Chi              = 0.30, #0.40,
+    Chi              = 0.00, #0.40,
+    kappa_ice        = 0.87,   # ice extinction coefficient (m^-1), used when sw_penetration = TRUE
     albedo_multiplier = 1.00,  # 
     start_filter    = as.POSIXct("2016-12-21 00:00:00"),
     n_years         = 6.95,
@@ -110,7 +129,8 @@ LAKE_CONFIGS <- list(
   WLB = list(
     lake_name        = "West Lake Bonney",
     L_initial        = 3.39,   # ice-to-ice thickness on 2016-12-17
-    Chi              = 0.25, #0.30,
+    Chi              = 0.00,
+    kappa_ice        = 0.87,   # ice extinction coefficient (m^-1), used when sw_penetration = TRUE
     albedo_multiplier = 1.00,  # no adjustment
     start_filter    = as.POSIXct("2016-12-23 00:00:00"),
     n_years         = 6.95,
@@ -127,7 +147,8 @@ LAKE_CONFIGS <- list(
   LH = list(
     lake_name        = "Lake Hoare",
     L_initial        = 3.50,   # ice-to-ice thickness on 2016-12-17
-    Chi              = 0.35,
+    Chi              = 0.00,
+    kappa_ice        = 1.145,   # ice extinction coefficient (m^-1), used when sw_penetration = TRUE
     albedo_multiplier = 1.00,  # no adjustment
     start_filter    = as.POSIXct("2016-12-14 00:00:00"),
     n_years         = 6.95,
@@ -144,7 +165,8 @@ LAKE_CONFIGS <- list(
   LF = list(
     lake_name        = "Lake Fryxell",
     L_initial        = 4.60,   # ice-to-ice thickness on 2016-12-17
-    Chi              = 0.35,
+    Chi              = 0.00,
+    kappa_ice        = 1.10,   # ice extinction coefficient (m^-1), used when sw_penetration = TRUE
     albedo_multiplier = 1.00,  # leave LF as-is
     start_filter    = as.POSIXct("2016-12-11 00:00:00"),
 
@@ -163,7 +185,7 @@ LAKE_CONFIGS <- list(
     lake_name         = "Green Lake 4",
     L_initial         = 0.10,   # = dx; start ice-covered (1 Jan is mid-winter) on a valid 2-node grid
     L_nucleation      = 0.10,   # = dx; new ice forms at one grid step so the profile can grow
-    Chi               = 0.25,
+    Chi               = 0.00,
     albedo_multiplier = 1.00,
     albedo_ice        = 0.70,   # constant dummy albedo — no AlbedoModel.csv for GL4
     seasonally_frozen = TRUE,
@@ -187,7 +209,7 @@ LAKE_CONFIGS <- list(
     lake_name         = "The Loch",
     L_initial         = 0.10,   # = dx; start ice-covered (1 Jan is mid-winter) on a valid 2-node grid
     L_nucleation      = 0.10,   # = dx; new ice forms at one grid step so the profile can grow
-    Chi               = 0.30,   # same as GL4 until Loch-specific tuning is available
+    Chi               = 0.00,   # same as GL4 until Loch-specific tuning is available
     albedo_multiplier = 1.00,
     albedo_ice        = 0.85,   # constant dummy albedo (same as GL4) — no albedo data for the Loch
     seasonally_frozen = TRUE,
@@ -217,6 +239,24 @@ LAKE_CONFIGS <- list(
 # ============================================================
 ICE_HOLE_EXCLUDE <- "B-?011"
 
+# ============================================================
+# Which MCM LTER ice measurement the model is compared against
+#   "z_ice"   = total (ice-to-ice) thickness, z_ice_m — matches L_initial,
+#               which is set from ice-to-ice thickness
+#   "z_water" = depth from the ice surface to the water level in the hole,
+#               z_water_m (thinner than z_ice by the freeboard)
+# The chosen value is returned in the z_water_m column of the observation
+# tables (the name every report and plot already uses), so switching here
+# changes every fit and plot. Dry Valley lakes only; GL4 / LOC are unaffected.
+# ============================================================
+ICE_OBS_MEASURE <- "z_water"
+
+mcm_obs_thickness <- function(z_water_m, z_ice_m, measure = ICE_OBS_MEASURE) {
+  switch(match.arg(measure, c("z_ice", "z_water")),
+         z_ice   = abs(as.numeric(z_ice_m)),
+         z_water = as.numeric(z_water_m) * -1)
+}
+
 exclude_ice_holes <- function(df, pattern = ICE_HOLE_EXCLUDE) {
   if (is.null(pattern) || !"location" %in% names(df)) return(df)
   dplyr::filter(df, is.na(location) | !grepl(pattern, location, ignore.case = TRUE))
@@ -241,6 +281,10 @@ lake_constants <- function(lake_key, lake_configs = LAKE_CONFIGS, constants = CO
   if (!is.null(cfg$seasonally_frozen)) overrides$seasonally_frozen <- cfg$seasonally_frozen
   if (!is.null(cfg$albedo_ice))        overrides$albedo_ice        <- cfg$albedo_ice
   if (!is.null(cfg$L_nucleation))      overrides$L_nucleation      <- cfg$L_nucleation
+  # optional per-lake shortwave-penetration settings
+  for (nm in c("sw_penetration", "i0", "kappa_ice", "sw_to_base",
+               "retain_meltwater", "phi_max"))
+    if (!is.null(cfg[[nm]])) overrides[[nm]] <- cfg[[nm]]
   modifyList(constants, overrides)
 }
 
@@ -542,7 +586,7 @@ prepare_lake_model_inputs <- function(
 
   ice_thickness_clean <- ice_thickness |>
     mutate(date_time = mdy_hm(date_time),
-           z_water_m = z_water_m * -1) |>
+           z_water_m = mcm_obs_thickness(z_water_m, z_ice_m)) |>   # see ICE_OBS_MEASURE
     filter(location_name == cfg$lake_name,
            date_time > ice_start,
            date_time < ice_end)
@@ -1211,11 +1255,95 @@ prepare_model_input <- function(
 }
 
 
+# ============================================================
+# surface_temp_energy_balance
+# — Solves the ice-surface energy balance for the skin temperature Ts (K):
+#
+#     SW_abs + LWR_in - eps*sigma*Ts^4 + H*(T_air - Ts) + Ql + k*(Tf - Ts)/L = 0
+#
+#   where H = rho_air * Ca * Ch * wind (W m^-2 K^-1) and the conductive term
+#   assumes a linear temperature profile from Ts at the top to Tf at the
+#   ice bottom. Every term but Ts is known, and the left-hand side falls
+#   monotonically as Ts rises, so there is exactly one root. If the balance
+#   is still positive with the surface at Tf, the surface is melting and
+#   Ts is capped at Tf. Used by run_ice_model(delta_T_method = "energy_balance").
+# ============================================================
+surface_temp_energy_balance <- function(T_air, SW_abs, LWR_in, Ql, H, L,
+                                        k, Tf, emissivity, sigma) {
+  f <- function(Ts) SW_abs + LWR_in - emissivity * sigma * Ts^4 +
+                    H * (T_air - Ts) + Ql + k * (Tf - Ts) / L
+  if (f(Tf) >= 0) return(Tf)
+  stats::uniroot(f, c(Tf - 100, Tf), tol = 1e-4)$root
+}
+
+
+# ============================================================
+# run_ice_model
+#
+# delta_T_method — how the air-minus-surface temperature difference (K) that
+# drives the sensible heat flux, Qh = rho_air * Ca * Ch * delta_T * wind, is
+# found during the ice phase:
+#
+#   "lag"            (the original model behaviour) delta_T =
+#                    T_air(t) - T_air(t-1), taken from prepare_model_input().
+#                    Because the ice-surface node is pinned to T_air, this is
+#                    the same as T_air minus the previous step's surface
+#                    temperature, so it averages to ~0 over a season.
+#   "lwr_out"        Surface temperature from the outgoing longwave,
+#                    Ts = (LWR_out / (eps * sigma))^(1/4), capped at Tf;
+#                    delta_T = T_air - Ts. Best when LWR_out is measured. Where
+#                    LWR_out is computed (e.g. The Loch: eps*sigma*Tf^4), this
+#                    reduces to delta_T = T_air - Tf. To use a different
+#                    LWR_out for delta_T only (e.g. the computed value at a
+#                    lake with measured LWR_out), add a column LWR_out_deltaT
+#                    to time_series; LW_net still uses LWR_out.
+#   "ashton"         Ashton (1989)-style: the surface sits where conduction
+#                    through the ice balances air-surface heat exchange,
+#                    Ts = (H*T_air + (k/L)*Tf) / (H + k/L), H = rho_air*Ca*Ch*wind,
+#                    L = ice thickness; delta_T = T_air - Ts.
+#   "energy_balance" Ts solved each step from the full surface energy balance
+#                    (surface_temp_energy_balance()); delta_T = T_air - Ts.
+#
+# Default: "ashton" (the first entry in the argument's choices).
+# The open-water phase is unchanged (delta_T = T_air - T_water) for every method.
+# Only Qh changes: the surface boundary condition of the heat equation (T_air)
+# and the conductive flux Qc are computed the same way for every method.
+# Two extra output columns are returned: delta_T (K) and T_surface (K).
+#
+# Shortwave penetration (constants$sw_penetration = TRUE; Beer–Lambert)
+#   Net shortwave SW_net = SW_in * (1 - albedo). A fraction (1 - i0) is absorbed
+#   at the surface; the rest, I0 = i0 * SW_net, enters the ice and decays as
+#   I(z) = I0 * exp(-kappa_ice * z). Each node absorbs what falls in its slice
+#   of ice:
+#     - top half-slice           -> added to the surface flux (SW_abs)
+#     - interior nodes           -> warm the ice; any warming past 0 °C melts ice
+#                                   internally (the meltwater is treated as lost,
+#                                   so the ice thins; no refreezing is modelled)
+#     - bottom half-slice        -> melts the ice base (that node sits at 0 °C)
+#     - below the ice base       -> into the lake; sw_to_base of it melts the base
+#   Thin ice with no interior nodes sends all in-ice absorption to the base.
+#   With retain_meltwater = TRUE (default) interior melt does NOT thin the ice:
+#   it is stored as a liquid fraction phi at each node (water in pores and
+#   channels, "rotten" ice). When conduction cools a wet node below 0 °C the
+#   water refreezes first, releasing its latent heat. Only water above phi_max
+#   drains (and that ice is lost). Melt at the ice base still thins the ice.
+#   Extra outputs: liquid_water (m of ice-equivalent water held in the ice)
+#   and refrozen (m refrozen per step).
+#   Chi is not used for the ice phase in this mode (the open-water phase is
+#   unchanged). Extra outputs: SW_pen (I0), SW_ice_abs (absorbed in the ice
+#   below the surface slice), SW_transmitted (leaving the ice base), and
+#   internal_melt (m of ice lost per step to penetrating shortwave).
+# ============================================================
 run_ice_model <- function(
     time_series,
-    constants     = CONSTANTS,
-    show_progress = TRUE
+    constants      = CONSTANTS,
+    show_progress  = TRUE,
+    delta_T_method = c("ashton"#, 
+                       #"lag", "lwr_out", "energy_balance"
+                       )   # first = default
 ) {
+  delta_T_method <- match.arg(delta_T_method)
+
   # ---- Unpack constants ----
   dx         <- constants$dx
   dt         <- constants$dt
@@ -1246,6 +1374,15 @@ run_ice_model <- function(
   L_nucleation <- constants$L_nucleation %||% 0.002
   albedo_water <- constants$albedo_water %||% 0.06
 
+  # ---- Shortwave penetration (Beer–Lambert; off by default) ----
+  sw_penetration <- isTRUE(constants$sw_penetration)
+  i0             <- constants$i0         %||% 0.40
+  kappa_ice      <- constants$kappa_ice  %||% 1.0
+  sw_to_base     <- constants$sw_to_base %||% 0.0
+  rho_c_ice      <- k / alpha               # volumetric heat capacity of ice (J m^-3 K^-1), = rho * c
+  retain_mw      <- sw_penetration && !isFALSE(constants$retain_meltwater)
+  phi_max        <- constants$phi_max %||% 0.30
+
   dt_sec <- dt * 86400
   r      <- alpha * dt_sec / dx^2
   n_iter <- nrow(time_series)
@@ -1263,6 +1400,11 @@ run_ice_model <- function(
   v_SW_in  <- time_series$SW_in
   v_LWR_in <- time_series$LWR_in
   v_LWR_out<- time_series$LWR_out
+  # Outgoing longwave used ONLY for the "lwr_out" delta_T method. An optional
+  # LWR_out_deltaT column overrides it (e.g. the computed eps*sigma*Tf^4 the
+  # Rockies lakes use) without changing LW_net, which still uses LWR_out.
+  v_LWR_out_dT <- if ("LWR_out_deltaT" %in% names(time_series))
+    time_series$LWR_out_deltaT else v_LWR_out
   v_albedo <- time_series$albedo
   v_press  <- time_series$pressure
   v_wind   <- time_series$wind
@@ -1281,6 +1423,14 @@ run_ice_model <- function(
   out_surface_flux <- numeric(n_iter)
   out_surface_loss <- numeric(n_iter)
   out_bottom_gain  <- numeric(n_iter)
+  out_delta_T      <- rep(NA_real_, n_iter)
+  out_T_surface    <- rep(NA_real_, n_iter)
+  out_SW_pen       <- numeric(n_iter)   # SW entering the ice below the surface layer (W m^-2)
+  out_SW_ice_abs   <- numeric(n_iter)   # ... of which absorbed in the ice below the top slice
+  out_SW_trans     <- numeric(n_iter)   # ... of which leaves through the ice base
+  out_int_melt     <- numeric(n_iter)   # ice lost to penetrating SW (m per step)
+  out_liquid       <- numeric(n_iter)   # meltwater held in the ice (m ice-equivalent)
+  out_refrozen     <- numeric(n_iter)   # meltwater refrozen this step (m ice-equivalent)
   out_depth        <- vector("list", n_iter)
   out_temperature  <- vector("list", n_iter)
   # seasonally-frozen extra outputs (NA for perennial lakes)
@@ -1295,6 +1445,7 @@ run_ice_model <- function(
                 else numeric(0)
   dL_surface <- 0
   dL_bottom  <- 0
+  phi        <- rep(0, length(prevT))   # liquid fraction at each node (retain_meltwater)
 
   # Seasonal state machine variables
   phase   <- if (L_initial > 0) "ice" else "open_water"
@@ -1343,13 +1494,76 @@ run_ice_model <- function(
         newT[1] <- T_air
       }
 
+      # -- Refreeze stored meltwater where the ice has cooled below 0 °C ----
+      refrozen <- 0
+      if (length(phi) != n_nodes) phi <- rep(0, n_nodes)
+      if (retain_mw && n_nodes >= 3 && any(phi > 0)) {
+        h_ice    <- prevL / (n_nodes - 1)
+        interior <- 2:(n_nodes - 1)
+        E_cold   <- pmax(Tf - newT[interior], 0) * rho_c_ice          # J m^-3 available
+        rf       <- pmin(phi[interior], E_cold / (rho * L_f))         # fraction refrozen
+        rf[is.na(rf)] <- 0
+        phi[interior]  <- phi[interior] - rf
+        newT[interior] <- newT[interior] + rf * rho * L_f / rho_c_ice  # latent heat released
+        refrozen <- sum(rf) * h_ice
+      }
+
       # -- Radiative fluxes ------------------------------------------------
-      SW_abs <- (1 - Chi) * SW_in * (1 - albedo)
+      SW_pen <- 0; SW_ice_abs <- 0; SW_trans <- 0; E_int_melt <- 0   # J m^-2 for E_int_melt
+      if (!sw_penetration) {
+        SW_abs <- (1 - Chi) * SW_in * (1 - albedo)
+      } else {
+        SW_net <- if (is.na(SW_in) || is.na(albedo)) NA_real_ else max(0, SW_in * (1 - albedo))
+        if (is.na(prevL) || prevL <= 0) {
+          SW_abs <- SW_net                                  # no ice: all absorbed at the surface
+        } else {
+          SW_abs <- (1 - i0) * SW_net
+          SW_pen <- i0 * SW_net
+        }
+        if (!is.na(SW_pen) && SW_pen > 0) {
+          att <- function(z) exp(-kappa_ice * z)
+          if (n_nodes >= 3) {
+            # node positions on the current grid and their slice boundaries
+            z  <- seq(0, prevL, length.out = n_nodes)
+            h  <- prevL / (n_nodes - 1)
+            zb <- c(0, z[-n_nodes] + h / 2, prevL)          # n_nodes + 1 boundaries
+            Q  <- SW_pen * (att(zb[-length(zb)]) - att(zb[-1]))  # W m^-2 absorbed per slice
+            SW_abs <- SW_abs + Q[1]                         # top half-slice -> surface
+            # interior nodes: warm the ice; SW warming past 0 °C melts it instead.
+            # (Only the SW increment is capped: a node already above 0 °C from the
+            # air-temperature surface boundary is left as it is.)
+            interior <- 2:(n_nodes - 1)
+            T_before <- newT[interior]
+            T_after  <- T_before + Q[interior] * dt_sec / (rho_c_ice * h)
+            over     <- pmax(T_after - pmax(T_before, Tf), 0)
+            newT[interior] <- T_after - over
+            over[is.na(over)] <- 0
+            if (retain_mw) {
+              # melt in place: store as liquid; only water above phi_max drains
+              phi[interior] <- phi[interior] + over * rho_c_ice / (rho * L_f)
+              drained       <- pmax(phi[interior] - phi_max, 0)
+              phi[interior] <- phi[interior] - drained
+              E_int_melt    <- sum(drained) * h * rho * L_f
+            } else {
+              E_int_melt <- sum(over) * rho_c_ice * h
+            }
+            # bottom half-slice (node at 0 °C) melts the base
+            E_int_melt <- E_int_melt + Q[n_nodes] * dt_sec
+            SW_ice_abs <- sum(Q[-1])
+          } else {
+            # thin ice without interior nodes: all in-ice absorption melts the base
+            SW_ice_abs <- SW_pen * (1 - att(prevL))
+            E_int_melt <- SW_ice_abs * dt_sec
+          }
+          SW_trans   <- SW_pen * att(prevL)
+          E_int_melt <- E_int_melt + sw_to_base * SW_trans * dt_sec
+        }
+      }
       LW_net <- LWR_in - LWR_out
 
-      # -- Sensible heat flux ----------------------------------------------
+      # -- Air density (Qh itself is computed below, after Ql, because the
+      #    "energy_balance" delta_T method needs Ql) -------------------------
       rho_air <- (press * Ma) / (R * T_air)   # kg m^-3; press is in Pa (removed stray *0.1, 2026-10-09)
-      Qh      <- rho_air * Ca * Ch * delta_T * wind
 
       # -- Latent heat flux ------------------------------------------------
       if (length(newT) > 0 && newT[1] >= Tf) {
@@ -1366,6 +1580,28 @@ run_ice_model <- function(
         (A * exp((B * T_ref) / (C + T_ref))) * 100          # hPa -> Pa
       }
       Ql <- rho_air_lat * xLatent * Ce * (0.622 / press) * (ea - es0) * wind
+
+      # -- Sensible heat flux (delta_T depends on delta_T_method) ----------
+      H_sens  <- rho_air * Ca * Ch * wind          # W m^-2 K^-1
+      L_cond  <- max(prevL, 1e-3)                  # ice thickness for conduction (m)
+      T_surf  <- switch(delta_T_method,
+        lag            = T_air - delta_T,
+        lwr_out        = min(Tf, (v_LWR_out_dT[t_idx] / (emissivity * sigma))^(1/4)),
+        ashton         = min(Tf, (H_sens * T_air + (k / L_cond) * Tf) /
+                                 (H_sens + k / L_cond)),
+        energy_balance = if (anyNA(c(T_air, SW_in, LWR_in, Ql, H_sens))) NA_real_ else
+          surface_temp_energy_balance(
+            T_air = T_air, SW_abs = SW_abs,
+            LWR_in = LWR_in, Ql = Ql, H = H_sens, L = L_cond,
+            k = k, Tf = Tf, emissivity = emissivity, sigma = sigma)
+      )
+      if (delta_T_method != "lag") {
+        delta_T <- if (is.na(T_surf)) v_dT[t_idx] else T_air - T_surf
+      }
+      # (written in the original order for "lag" so results are bit-identical)
+      Qh <- if (delta_T_method == "lag") rho_air * Ca * Ch * delta_T * wind else H_sens * delta_T
+      out_delta_T[t_idx]   <- delta_T
+      out_T_surface[t_idx] <- T_surf
 
       # -- Conductive flux -------------------------------------------------
       Qc <- if (length(prevT) >= 1) k * (prevT[1] - T_air) / dx else 0
@@ -1398,6 +1634,10 @@ run_ice_model <- function(
         newL      <- newL + dL_bottom
       }
 
+      # -- Ice lost to penetrating shortwave (sw_penetration only) -----------
+      dL_internal <- if (!is.na(E_int_melt) && E_int_melt > 0) E_int_melt / (rho * L_f) else 0
+      if (!is.na(newL)) newL <- newL - dL_internal
+
       newL <- max(0, newL)
 
       # -- Regrid temperature profile --------------------------------------
@@ -1411,15 +1651,23 @@ run_ice_model <- function(
             xout = seq(0, newL, length.out = length(newdepth)),
             rule = 2
           )$y
+          if (retain_mw && length(phi) == length(old_grid) && any(phi > 0)) {
+            phi <- approx(old_grid, phi, xout = seq(0, newL, length.out = length(newdepth)),
+                          rule = 2)$y
+            phi[c(1, length(phi))] <- 0     # boundary nodes hold no water
+          } else phi <- rep(0, length(newdepth))
         } else {
           newT <- rep(mean(newT, na.rm = TRUE), length(newdepth))
+          phi  <- rep(0, length(newdepth))
         }
       } else if (newL <= 0) {
         newdepth <- NA_real_
         newT     <- numeric(0)
+        phi      <- numeric(0)
       } else {
         newdepth <- seq(0, newL, by = dx)
         newT     <- seq(from = T_air, to = Tf, length.out = length(newdepth))
+        phi      <- rep(0, length(newdepth))
       }
 
       # -- Seasonal: switch to open_water when ice disappears ---------------
@@ -1435,6 +1683,7 @@ run_ice_model <- function(
 
       # Use open-water albedo
       albedo_eff <- albedo_water
+      SW_pen <- 0; SW_ice_abs <- 0; SW_trans <- 0; dL_internal <- 0; refrozen <- 0
 
       # Radiative fluxes (LWR_out from water surface temperature)
       SW_abs <- (1 - Chi) * SW_in * (1 - albedo_eff)
@@ -1447,6 +1696,8 @@ run_ice_model <- function(
       rho_air     <- (press * Ma) / (R * T_air)   # kg m^-3; press in Pa (removed stray *0.1, 2026-10-09)
       dT_bulk     <- T_air - T_water
       Qh          <- rho_air * Ca * Ch * dT_bulk * wind
+      out_delta_T[t_idx]   <- dT_bulk
+      out_T_surface[t_idx] <- T_water
 
       # Latent heat from open water surface
       A <- 6.1121; B <- 17.502; C <- 240.97; xLatent <- xLv
@@ -1476,6 +1727,7 @@ run_ice_model <- function(
         newL     <- L_nucleation
         newdepth <- seq(0, newL, by = dx)
         newT     <- seq(from = T_air, to = Tf, length.out = length(newdepth))
+        phi      <- rep(0, length(newT))
       } else {
         # Clamp water temp: can't meaningfully rise above some physical limit,
         # but we only enforce the lower bound here (no ice can exist > Tf)
@@ -1483,6 +1735,7 @@ run_ice_model <- function(
         newL     <- 0
         newdepth <- NA_real_
         newT     <- numeric(0)
+        phi      <- numeric(0)
       }
       LWR_out <- LWR_out_water   # update for storage consistency
     }
@@ -1503,6 +1756,13 @@ run_ice_model <- function(
     out_surface_flux[t_idx] <- surface_flux
     out_surface_loss[t_idx] <- dL_surface
     out_bottom_gain[t_idx]  <- dL_bottom
+    out_SW_pen[t_idx]       <- SW_pen
+    out_SW_ice_abs[t_idx]   <- SW_ice_abs
+    out_SW_trans[t_idx]     <- SW_trans
+    out_int_melt[t_idx]     <- dL_internal
+    out_refrozen[t_idx]     <- refrozen
+    out_liquid[t_idx]       <- if (length(phi) >= 3 && prevL > 0)
+                                 sum(phi) * prevL / (length(phi) - 1) else 0
     out_depth[[t_idx]]      <- depth
     out_temperature[[t_idx]]<- prevT
     if (seasonally_frozen) {
@@ -1525,6 +1785,14 @@ run_ice_model <- function(
     surface_heat_flux = out_surface_flux,
     surface_loss      = out_surface_loss,
     bottom_gain       = out_bottom_gain,
+    delta_T           = out_delta_T,
+    T_surface         = out_T_surface,
+    SW_pen            = out_SW_pen,
+    SW_ice_abs        = out_SW_ice_abs,
+    SW_transmitted    = out_SW_trans,
+    internal_melt     = out_int_melt,
+    liquid_water      = out_liquid,
+    refrozen          = out_refrozen,
     depth             = out_depth,
     temperature       = out_temperature
   )
@@ -1940,7 +2208,7 @@ load_ice_observations <- function(
     obs <- readr::read_csv(file.path(project_path, "Data/mcmlter-lake-ice_thickness-20250218_0_2025.csv"),
                            show_col_types = FALSE) |>
       dplyr::mutate(date_time = lubridate::mdy_hm(date_time, tz = "UTC"),
-                    z_water_m = z_water_m * -1) |>
+                    z_water_m = mcm_obs_thickness(z_water_m, z_ice_m)) |>   # see ICE_OBS_MEASURE
       dplyr::filter(location_name == cfg$lake_name)
     if (!is.null(cfg$ice_loc_filter)) obs <- cfg$ice_loc_filter(obs)
     obs <- exclude_ice_holes(obs)
