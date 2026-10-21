@@ -8,7 +8,7 @@ params:
   # TRUE  = re-run every lake's 01_ model script (and its 00_ data prep) before
   #         building the report, so changes to R/functions/ are picked up.
   # FALSE = skip the model runs and use the CSVs already in Data/model_outputs/.
-  rerun_models: FALSE
+  rerun_models: TRUE
 ---
 
 ```{r setup, include = FALSE}
@@ -264,6 +264,57 @@ ggplot(phen_plot, aes(y = year)) +
   theme(strip.text = element_text(face = "bold", hjust = 0),
         panel.grid.minor = element_blank())
 ```
+
+### The Loch: modelled vs observed ice-off and ice-on
+
+Observed dates from `Data/ice_off_dates*.xlsx` and `Data/ice_on_dates*.xlsx`
+(The Loch). Each observed date is matched to the modelled ice-off or ice-on in
+the same calendar year. Positive difference = model later than observed.
+
+```{r loc-phenology-compare}
+obs_off_file <- list.files(file.path(path, "Data"), pattern = "^ice_off_dates.*\\.xlsx$", full.names = TRUE)[1]
+obs_on_file  <- list.files(file.path(path, "Data"), pattern = "^ice_on_dates.*\\.xlsx$",  full.names = TRUE)[1]
+loc_phen <- if (has_phen) dplyr::filter(phenology, lake == LAKE_CONFIGS$LOC$lake_name) else NULL
+has_loc_obs <- !is.na(obs_off_file) && !is.na(obs_on_file) && !is.null(loc_phen) && nrow(loc_phen) > 0
+
+if (has_loc_obs) {
+  obs_off <- readxl::read_excel(obs_off_file) |>
+    dplyr::transmute(obs_off = as.Date(Date), year = as.integer(format(obs_off, "%Y")))
+  obs_on  <- readxl::read_excel(obs_on_file) |>
+    dplyr::transmute(obs_on = as.Date(Date), year = as.integer(format(obs_on, "%Y")))
+  mod_off <- loc_phen |> dplyr::group_by(year) |> dplyr::slice_min(ice_off, n = 1) |>
+    dplyr::ungroup() |> dplyr::select(year, mod_off = ice_off)
+  mod_on  <- loc_phen |> dplyr::filter(!is.na(ice_on)) |>
+    dplyr::mutate(year = as.integer(format(ice_on, "%Y"))) |>
+    dplyr::group_by(year) |> dplyr::slice_max(ice_on, n = 1) |>
+    dplyr::ungroup() |> dplyr::select(year, mod_on = ice_on)
+
+  loc_cmp <- obs_off |>
+    dplyr::full_join(obs_on,  by = "year") |>
+    dplyr::full_join(mod_off, by = "year") |>
+    dplyr::full_join(mod_on,  by = "year") |>
+    dplyr::filter(!is.na(mod_off) | !is.na(mod_on)) |>
+    dplyr::arrange(year) |>
+    dplyr::mutate(off_diff = as.numeric(mod_off - obs_off),
+                  on_diff  = as.numeric(mod_on - obs_on))
+
+  fmt <- function(d) ifelse(is.na(d), "–", format(d, "%d %b"))
+  loc_cmp |>
+    dplyr::transmute(Year = year,
+                     `Ice-off observed` = fmt(obs_off), `Ice-off model` = fmt(mod_off),
+                     `Ice-off diff (days)` = off_diff,
+                     `Ice-on observed` = fmt(obs_on), `Ice-on model` = fmt(mod_on),
+                     `Ice-on diff (days)` = on_diff,
+                     `Open season observed (days)` = as.numeric(obs_on - obs_off),
+                     `Open season model (days)` = as.numeric(mod_on - mod_off)) |>
+    knitr::kable(caption = sprintf(
+      "The Loch ice phenology. Mean difference (model − observed): ice-off %+.1f days (n = %d), ice-on %+.1f days (n = %d).",
+      mean(loc_cmp$off_diff, na.rm = TRUE), sum(!is.na(loc_cmp$off_diff)),
+      mean(loc_cmp$on_diff,  na.rm = TRUE), sum(!is.na(loc_cmp$on_diff))))
+}
+```
+
+`r if (!exists("has_loc_obs") || !isTRUE(has_loc_obs)) "*No observed ice-on / ice-off files found in Data/, or no modelled seasons for The Loch.*" else ""`
 
 ## Ice thickness measurement types
 
