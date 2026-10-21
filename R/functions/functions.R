@@ -34,14 +34,14 @@ CONSTANTS <- list(
   # (and, at 0 °C, melting) the ice interior, with anything left at the ice base
   # passing into the lake.
   sw_penetration = TRUE,
-  i0             = 0.20,      # fraction of net SW that passes below the surface layer
+  i0             = 0.55,      # fraction of net SW that passes below the surface layer
                               # (~0.3 white/bubbly ice to ~0.6+ clear ice; starting value)
   kappa_ice      = 1.0,       # bulk extinction coefficient of the ice (m^-1; starting value)
-  retain_meltwater = TRUE,    # TRUE = interior melt from penetrating SW stays in the ice
+  retain_meltwater = FALSE,    # TRUE = interior melt from penetrating SW stays in the ice
                               # as liquid water and refreezes when the ice cools (only a
                               # layer wetter than phi_max drains); FALSE = it is lost at
                               # once (the ice thins straight away)
-  phi_max        = 0.30,      # liquid fraction above which a layer drains (0–1)
+  phi_max        = 0.10,      # liquid fraction above which a layer drains (0–1)
 
   # Conductive flux Qc in the surface energy balance (ice phase) — see run_ice_model()
   #   "air_change"   original: k * (T_air(t-1) - T_air(t)) / dx, i.e. only the
@@ -50,7 +50,25 @@ CONSTANTS <- list(
   #   "ice_gradient" conduction between the surface node and the node below it on
   #                  the current ice profile: k * (T_surface - T_node2) / h
   #   "none"         no Qc term (conduction is left to the heat equation)
-  Qc_method      = "ice_gradient",
+  #   "ice_gradient_sink"  as "ice_gradient", but only conduction INTO the ice
+  #                  (surface warmer than the ice below) enters the surface balance.
+  #                  Upward conduction is left out: the surface node is held at the
+  #                  air temperature, so in winter it is far colder than the ice
+  #                  just below, and that upward heat would otherwise be counted as
+  #                  melt even in the polar night. Stand-in until the surface has its
+  #                  own heat storage.
+  Qc_method      = "ice_gradient_sink",
+
+  # Ice-surface boundary condition (ice phase) — see run_ice_model()
+  #   "air_temp" original: the surface node is set to the air temperature every hour
+  #   "flux"     the surface node has its own temperature T_s, solved each hour from
+  #              the energy balance of the top half-slice of ice (absorbed SW + LW_in
+  #              - eps*sigma*T_s^4 + sensible + latent + conduction from below =
+  #              heat stored). It starts from the air temperature (initial profile and
+  #              new ice), then evolves from the fluxes. Melt only when T_s reaches
+  #              0 °C; negative balances cool the ice instead of being discarded.
+  #              In this mode delta_T_method and Qc_method are not used.
+  surface_bc     = "flux",
   sw_to_base     = 0.0,       # fraction of SW transmitted through the ice base that melts
                               # the base; the rest heats the lake (0 = all to the lake)
 
@@ -69,6 +87,11 @@ CONSTANTS <- list(
                                # — controls how quickly the lake surface cools/warms;
                                # tune this to match observed freeze-onset timing
   L_nucleation      = 0.002,  # ice thickness at nucleation (m) — 2 mm of new ice
+  ice_off_threshold = 0.10,   # seasonal lakes: once the ice has been thicker than this
+                               # during the season, falling back below it in one of the
+                               # ice_off_months means melt-out — the remaining ice is
+                               # removed (counted as surface melt) and the lake opens
+  ice_off_months    = 4:9,    # months when that melt-out rule applies (N. hemisphere spring/summer)
   albedo_water      = 0.06,   # open-water albedo (replaces time_series$albedo when
                                # the lake is ice-free; typical clear-water value)
   albedo_ice        = 0.85    # default ice/snow albedo for lakes with no AlbedoModel
@@ -121,7 +144,7 @@ LAKE_CONFIGS <- list(
     lake_name        = "East Lake Bonney",
     L_initial        = 3.88,   # ice-to-ice thickness on 2016-12-17
     Chi              = 0.00, #0.40,
-    kappa_ice        = 0.87,   # ice extinction coefficient (m^-1), used when sw_penetration = TRUE
+    kappa_ice        = 0.85,   # ice extinction coefficient (m^-1), used when sw_penetration = TRUE
     albedo_multiplier = 1.00,  # 
     start_filter    = as.POSIXct("2016-12-21 00:00:00"),
     n_years         = 6.95,
@@ -132,15 +155,17 @@ LAKE_CONFIGS <- list(
     wind      = list(primary = "BOYM", secondary = "TARM"),
     humidity  = list(primary = "BOYM", secondary = "TARM"),
     coords         = list(lat = -77.13449, lon = 162.449716),
-    ice_loc_filter = NULL
+    ice_loc_filter = function(df) dplyr::filter(df, grepl("^Outside", location))   # Outside holes only
   ),
 
   WLB = list(
     lake_name        = "West Lake Bonney",
     L_initial        = 3.39,   # ice-to-ice thickness on 2016-12-17
     Chi              = 0.00,
-    kappa_ice        = 0.87,   # ice extinction coefficient (m^-1), used when sw_penetration = TRUE
+    kappa_ice        = 1.08,   # ice extinction coefficient (m^-1), used when sw_penetration = TRUE
+    retain_meltwater = FALSE,   # WLB only: interior meltwater stays in the ice and refreezes
     albedo_multiplier = 1.00,  # no adjustment
+    albedo_source = "wholelake", 
     start_filter    = as.POSIXct("2016-12-23 00:00:00"),
     n_years         = 6.95,
     base_station    = "BOYM",
@@ -150,14 +175,14 @@ LAKE_CONFIGS <- list(
     wind      = list(primary = "BOYM", secondary = "TARM"),
     humidity  = list(primary = "BOYM", secondary = "TARM"),
     coords         = list(lat = -77.13449, lon = 162.449716),
-    ice_loc_filter = function(df) dplyr::filter(df, str_detect(location, "Inside"))
+    ice_loc_filter = function(df) dplyr::filter(df, grepl("^Outside", location))   # Outside holes only
   ),
 
   LH = list(
     lake_name        = "Lake Hoare",
     L_initial        = 3.50,   # ice-to-ice thickness on 2016-12-17
     Chi              = 0.00,
-    kappa_ice        = 1.145,   # ice extinction coefficient (m^-1), used when sw_penetration = TRUE
+    kappa_ice        = 1.08,   # ice extinction coefficient (m^-1), used when sw_penetration = TRUE
     albedo_multiplier = 1.00,  # no adjustment
     start_filter    = as.POSIXct("2016-12-14 00:00:00"),
     n_years         = 6.95,
@@ -168,15 +193,15 @@ LAKE_CONFIGS <- list(
     wind      = list(primary = "HOEM", secondary = "FRLM"),
     humidity  = list(primary = "HOEM", secondary = "FRLM"),
     coords         = list(lat = -77.13449, lon = 162.449716),
-    ice_loc_filter = NULL
+    ice_loc_filter = function(df) dplyr::filter(df, grepl("^Outside", location))   # Outside holes only
   ),
 
   LF = list(
     lake_name        = "Lake Fryxell",
     L_initial        = 4.60,   # ice-to-ice thickness on 2016-12-17
     Chi              = 0.00,
-    kappa_ice        = 1.10,   # ice extinction coefficient (m^-1), used when sw_penetration = TRUE
-    albedo_multiplier = 1.00,  # leave LF as-is
+    kappa_ice        = 1.08,   # ice extinction coefficient (m^-1), used when sw_penetration = TRUE
+    albedo_multiplier = 1.00,  # avg SW = 279 / LH sw 261 = 0.93
     start_filter    = as.POSIXct("2016-12-11 00:00:00"),
 
     n_years         = 6.95,   # NOTE: legacy 00_LF_data_preparation.R used 20 — see message at end of refactor
@@ -187,7 +212,7 @@ LAKE_CONFIGS <- list(
     wind      = list(primary = "FRLM", secondary = "EXEM"),
     humidity  = list(primary = "FRLM", secondary = "EXEM"),
     coords         = list(lat = -77.13449, lon = 162.449716),
-    ice_loc_filter = function(df) dplyr::filter(df, str_starts(location, "O"))
+    ice_loc_filter = function(df) dplyr::filter(df, grepl("^Outside", location))   # Outside holes only
   ),
 
   GL4 = list(
@@ -196,7 +221,7 @@ LAKE_CONFIGS <- list(
     L_nucleation      = 0.10,   # = dx; new ice forms at one grid step so the profile can grow
     Chi               = 0.00,
     albedo_multiplier = 1.00,
-    albedo_ice        = 0.70,   # constant dummy albedo — no AlbedoModel.csv for GL4
+    albedo_ice        = 0.60,   # constant dummy albedo — no AlbedoModel.csv for GL4
     seasonally_frozen = TRUE,
     start_filter      = as.POSIXct("2014-01-01 00:00:00"),
 
@@ -290,9 +315,11 @@ lake_constants <- function(lake_key, lake_configs = LAKE_CONFIGS, constants = CO
   if (!is.null(cfg$seasonally_frozen)) overrides$seasonally_frozen <- cfg$seasonally_frozen
   if (!is.null(cfg$albedo_ice))        overrides$albedo_ice        <- cfg$albedo_ice
   if (!is.null(cfg$L_nucleation))      overrides$L_nucleation      <- cfg$L_nucleation
+  if (!is.null(cfg$ice_off_threshold)) overrides$ice_off_threshold <- cfg$ice_off_threshold
+  if (!is.null(cfg$ice_off_months))    overrides$ice_off_months    <- cfg$ice_off_months
   # optional per-lake shortwave-penetration settings
   for (nm in c("sw_penetration", "i0", "kappa_ice", "sw_to_base",
-               "retain_meltwater", "phi_max", "Qc_method"))
+               "retain_meltwater", "phi_max", "Qc_method", "surface_bc"))
     if (!is.null(cfg[[nm]])) overrides[[nm]] <- cfg[[nm]]
   modifyList(constants, overrides)
 }
@@ -920,7 +947,7 @@ prepare_gl4_model_inputs <- function(
     dplyr::rename(time = date.time_start) |>
     dplyr::mutate(
       time = lubridate::parse_date_time(time,
-               orders = c("Ymd HMS", "Ymd HM", "mdY HM", "mdY HMS"),
+               orders = c("Ymd HMS", "Ymd HM", "Ymd", "mdY HM", "mdY HMS", "mdY"),
                tz = "UTC")
     ) |>
     dplyr::filter(!is.na(time))
@@ -933,6 +960,19 @@ prepare_gl4_model_inputs <- function(
     t0 <- min(met_raw$time, na.rm = TRUE)
     met_raw <- dplyr::filter(met_raw, time <= t0 + lubridate::dyears(n_years))
   }
+
+  # Dead-sensor days: the D1 pyranometer records ~0 (not NA) for long stretches
+  # (e.g. 2014-01 to 2014-04, 16 Jun – 22 Sep 2015, Oct–Nov 2024). A day whose
+  # maximum SW never exceeds 5 W/m² is impossible at 40° N, so set those days to
+  # NA; the month × hour-of-day climatology below then fills them.
+  met_raw <- met_raw |>
+    dplyr::group_by(.day = as.Date(time)) |>
+    dplyr::mutate(solrad_avg = if (all(is.na(solrad_avg)) ||
+                                   max(solrad_avg, na.rm = TRUE) <= 5) NA_real_ else solrad_avg) |>
+    dplyr::ungroup() |>
+    dplyr::select(-.day)
+  n_dead <- sum(is.na(met_raw$solrad_avg))
+  message(sprintf("  [GL4] %d ten-minute SW values in dead-sensor/missing days -> filled from climatology", n_dead))
 
   # Flag / remove erroneous SW values (instrument ceiling ~1500 W/m²)
   met_raw <- met_raw |>
@@ -1319,9 +1359,33 @@ surface_temp_energy_balance <- function(T_air, SW_abs, LWR_in, Ql, H, L,
 # and the conductive flux Qc are computed the same way for every method.
 # Two extra output columns are returned: delta_T (K) and T_surface (K).
 #
+# Melt-out (seasonally frozen lakes; constants$ice_off_threshold, $ice_off_months):
+#   once the ice has been thicker than ice_off_threshold this season, thinning back
+#   below it in one of ice_off_months removes the remaining ice (added to
+#   surface_loss) and opens the lake, so thin spring ice no longer lingers for weeks.
+#
+# Surface boundary (constants$surface_bc)
+#   "air_temp": the top node is set to T_air each hour (original).
+#   "flux": the top node is a surface layer with its own temperature T_s and heat
+#   capacity (rho*c * h/2, the top half-slice). Each hour T_s is solved implicitly
+#   (Newton) from
+#     C_s (T_s - T_s_old)/dt = SW_abs + LWR_in - eps*sigma*T_s^4 + H (T_air - T_s)
+#                              + Ql(T_s) + k (T_2 - T_s)/h
+#   with H = rho_air*Ca*Ch*wind, Ql from saturation at T_s, T_2 = the node below.
+#   If the balance is still positive with T_s = 0 °C, T_s is held at 0 °C and the
+#   remainder melts the surface. The profile starts from the air temperature
+#   (initial condition and newly formed ice) and then evolves from the fluxes.
+#   Outputs in this mode: T_surface = T_s, delta_T = T_air - T_s, LW_net uses
+#   eps*sigma*T_s^4 (the LWR_out input is not used), conductive_Q = k (T_s - T_2)/h
+#   (positive into the ice), surface_heat_flux = net flux into the surface slice.
+#   delta_T_method and Qc_method are ignored. Thin ice with one node falls back
+#   to "air_temp".
+#
 # Conductive flux (constants$Qc_method): "air_change" (original, k*(T_air(t-1) -
 #   T_air(t))/dx), "ice_gradient" (k*(T_surface - T_node2)/h from the current ice
-#   profile, h = actual node spacing), or "none". Default in CONSTANTS.
+#   profile, h = actual node spacing), "ice_gradient_sink" (the same, but only
+#   conduction into the ice counts; upward conduction to the air-temperature
+#   surface node is left out so it cannot create melt), or "none". Default in CONSTANTS.
 #
 # Shortwave penetration (constants$sw_penetration = TRUE; Beer–Lambert)
 #   Net shortwave SW_net = SW_in * (1 - albedo). A fraction (1 - i0) is absorbed
@@ -1385,6 +1449,8 @@ run_ice_model <- function(
   Cp_water     <- constants$Cp_water     %||% 4218
   mixing_depth <- constants$mixing_depth %||% 0.5
   L_nucleation <- constants$L_nucleation %||% 0.002
+  ice_off_threshold <- constants$ice_off_threshold %||% 0
+  ice_off_months    <- constants$ice_off_months    %||% 4:9
   albedo_water <- constants$albedo_water %||% 0.06
 
   # ---- Shortwave penetration (Beer–Lambert; off by default) ----
@@ -1395,8 +1461,9 @@ run_ice_model <- function(
   rho_c_ice      <- k / alpha               # volumetric heat capacity of ice (J m^-3 K^-1), = rho * c
   retain_mw      <- sw_penetration && !isFALSE(constants$retain_meltwater)
   phi_max        <- constants$phi_max %||% 0.30
+  surface_bc     <- match.arg(constants$surface_bc %||% "air_temp", c("air_temp", "flux"))
   Qc_method      <- match.arg(constants$Qc_method %||% "air_change",
-                              c("air_change", "ice_gradient", "none"))
+                              c("air_change", "ice_gradient", "ice_gradient_sink", "none"))
 
   dt_sec <- dt * 86400
   r      <- alpha * dt_sec / dx^2
@@ -1461,6 +1528,7 @@ run_ice_model <- function(
   dL_surface <- 0
   dL_bottom  <- 0
   phi        <- rep(0, length(prevT))   # liquid fraction at each node (retain_meltwater)
+  season_max_L <- L_initial             # thickest ice so far this ice season (melt-out rule)
 
   # Seasonal state machine variables
   phase   <- if (L_initial > 0) "ice" else "open_water"
@@ -1503,7 +1571,7 @@ run_ice_model <- function(
 
       # -- Boundary conditions ---------------------------------------------
       if (n_nodes >= 2) {
-        newT[1]       <- T_air
+        if (surface_bc == "air_temp" || is.na(newT[1])) newT[1] <- T_air  # "flux": solved below
         newT[n_nodes] <- Tf
       } else if (n_nodes == 1) {
         newT[1] <- T_air
@@ -1623,6 +1691,8 @@ run_ice_model <- function(
         air_change   = if (length(prevT) >= 1) k * (prevT[1] - T_air) / dx else 0,
         ice_gradient = if (n_nodes >= 2 && !is.na(prevL) && prevL > 0)
                          k * (newT[1] - newT[2]) / (prevL / (n_nodes - 1)) else 0,
+        ice_gradient_sink = if (n_nodes >= 2 && !is.na(prevL) && prevL > 0)
+                         max(0, k * (newT[1] - newT[2]) / (prevL / (n_nodes - 1))) else 0,
         none         = 0)
       if (is.na(Qc)) Qc <- 0
 
@@ -1632,6 +1702,50 @@ run_ice_model <- function(
       dL_surface <- 0
       if (!is.na(surface_flux) && surface_flux > 0) {
         dL_surface <- surface_flux * dt_sec / (rho * L_f)
+      }
+
+      # -- Flux surface boundary: solve the surface-layer temperature ----------
+      if (surface_bc == "flux" && n_nodes >= 2 && !is.na(prevL) && prevL > 0 &&
+          !anyNA(c(T_air, LWR_in, wind, press, rh, SW_abs, newT[1], newT[2]))) {
+        h_s   <- prevL / (n_nodes - 1)
+        C_s   <- rho_c_ice * h_s / 2                      # J m^-2 K^-1 (top half-slice)
+        T_old <- newT[1]
+        T_2   <- newT[2]
+        H     <- rho_air * Ca * Ch * wind                 # W m^-2 K^-1
+        qfac  <- rho_air_lat * Ce * (0.622 / press) * wind
+        es_ice  <- function(T) 611.15 * exp(22.452 * (T - Tf) / (272.55 + T - Tf))
+        des_ice <- function(T) es_ice(T) * 22.452 * 272.55 / (272.55 + T - Tf)^2
+        fl <- function(T) {                               # flux terms at surface temp T
+          Lh <- if (T >= Tf) xLv else xLs
+          es <- if (T >= Tf) 611.21 else es_ice(T)
+          c(LW = LWR_in - emissivity * sigma * T^4, Qh = H * (T_air - T),
+            Ql = qfac * Lh * (ea - es), Qc = k * (T - T_2) / h_s)
+        }
+        bal <- function(T) { f <- fl(T)
+          SW_abs + f[["LW"]] + f[["Qh"]] + f[["Ql"]] - f[["Qc"]] - C_s * (T - T_old) / dt_sec }
+        if (bal(Tf) >= 0) {
+          T_new  <- Tf
+          E_melt <- bal(Tf)                               # W m^-2 left over at 0 °C
+        } else {
+          T_new <- min(T_old, Tf - 0.01)
+          for (it in 1:30) {
+            g  <- bal(T_new)
+            dg <- -4 * emissivity * sigma * T_new^3 - H - qfac * xLs * des_ice(T_new) -
+                  k / h_s - C_s / dt_sec
+            step  <- g / dg
+            T_new <- min(max(T_new - step, Tf - 120), Tf)
+            if (abs(step) < 1e-4) break
+          }
+          E_melt <- 0
+        }
+        f <- fl(T_new)
+        LW_net  <- f[["LW"]]; LWR_out <- emissivity * sigma * T_new^4
+        Qh      <- f[["Qh"]]; Ql <- f[["Ql"]]; Qc <- f[["Qc"]]
+        surface_flux <- SW_abs + LW_net + Qh + Ql - Qc    # net into the surface slice
+        dL_surface   <- E_melt * dt_sec / (rho * L_f)
+        newT[1]      <- T_new
+        out_delta_T[t_idx]   <- T_air - T_new
+        out_T_surface[t_idx] <- T_new
       }
 
       newL <- prevL - dL_surface
@@ -1659,6 +1773,20 @@ run_ice_model <- function(
       if (!is.na(newL)) newL <- newL - dL_internal
 
       newL <- max(0, newL)
+
+      # -- Melt-out (seasonal lakes): thin ice in spring/summer is about to go --
+      # Ice that has been thicker than ice_off_threshold this season and thins back
+      # below it during ice_off_months is removed at once (counted as surface melt).
+      # Thin ice during freeze-up (season max still below the threshold) is untouched.
+      if (seasonally_frozen && !is.na(newL)) {
+        season_max_L <- max(season_max_L, newL)
+        if (ice_off_threshold > 0 && newL > 0 && newL < ice_off_threshold &&
+            season_max_L >= ice_off_threshold &&
+            lubridate::month(v_time[t_idx]) %in% ice_off_months) {
+          dL_surface <- dL_surface + newL
+          newL       <- 0
+        }
+      }
 
       # -- Regrid temperature profile --------------------------------------
       if (newL > 0 && prevL > 0 && length(newT) >= 2 && !all(is.na(newT))) {
@@ -1745,6 +1873,7 @@ run_ice_model <- function(
         T_water  <- Tf
         phase    <- "ice"
         newL     <- L_nucleation
+        season_max_L <- L_nucleation      # new ice season
         newdepth <- seq(0, newL, by = dx)
         newT     <- seq(from = T_air, to = Tf, length.out = length(newdepth))
         phi      <- rep(0, length(newT))
@@ -2243,4 +2372,49 @@ load_ice_observations <- function(
     obs <- dplyr::filter(obs, date_time >= time_range[1], date_time <= time_range[2])
   }
   obs
+}
+
+
+# ============================================================
+# ice_phenology
+# — ice-off / ice-on dates for a seasonally frozen lake from run_ice_model()
+#   output (needs the phase column). One row per open-water season:
+#   ice_off (first day of open water), ice_on (first day of lasting ice),
+#   open_season_days, open_days (days actually open), refreezes (short
+#   refreezes merged into the season) and max_thickness (thickest ice in the
+#   preceding ice season). Open spells < min_open_days are ignored; refreezes
+#   < min_ice_days inside an open season are merged into it.
+# ============================================================
+ice_phenology <- function(res, min_open_days = 3, min_ice_days = 7) {
+  if (!"phase" %in% names(res)) return(NULL)
+  d <- res |>
+    dplyr::mutate(day = as.Date(time)) |>
+    dplyr::group_by(day) |>
+    dplyr::summarise(open = mean(phase == "open_water", na.rm = TRUE) >= 0.5,
+                     thick = max(thickness, na.rm = TRUE), .groups = "drop")
+  r <- rle(d$open); ends <- cumsum(r$lengths); starts <- ends - r$lengths + 1
+  runs <- tibble::tibble(open = r$values, start = d$day[starts], end = d$day[ends],
+                         days = r$lengths) |>
+    dplyr::filter(open, days >= min_open_days)
+  if (nrow(runs) == 0) return(NULL)
+  seasons <- list(); cur <- runs[1, ]; cur$refreezes <- 0L; cur$open_days <- cur$days
+  for (i in seq_len(nrow(runs))[-1]) {
+    gap <- as.numeric(runs$start[i] - cur$end) - 1
+    if (gap < min_ice_days) {
+      cur$end <- runs$end[i]; cur$open_days <- cur$open_days + runs$days[i]
+      cur$refreezes <- cur$refreezes + 1L
+    } else { seasons[[length(seasons) + 1]] <- cur; cur <- runs[i, ]; cur$refreezes <- 0L; cur$open_days <- cur$days }
+  }
+  seasons[[length(seasons) + 1]] <- cur
+  out <- dplyr::bind_rows(seasons) |>
+    dplyr::transmute(year = as.integer(format(start, "%Y")), ice_off = start,
+                     ice_on = dplyr::if_else(end < max(d$day), end + 1, as.Date(NA)),
+                     open_season_days = as.numeric(ice_on - ice_off),
+                     open_days, refreezes)
+  # thickest ice in the winter before each ice-off
+  prev_on <- c(min(d$day), head(out$ice_on, -1))
+  out$max_thickness <- purrr::map2_dbl(prev_on, out$ice_off, function(a, b) {
+    a <- if (is.na(a)) min(d$day) else a
+    v <- d$thick[d$day >= a & d$day < b]; if (length(v)) max(v) else NA_real_ })
+  out
 }

@@ -8,10 +8,7 @@ params:
   # TRUE  = re-run every lake's 01_ model script (and its 00_ data prep) before
   #         building the report, so changes to R/functions/ are picked up.
   # FALSE = skip the model runs and use the CSVs already in Data/model_outputs/.
-  rerun_models: true
-  # TRUE = also re-run R/Compare_Albedo_Sources.R (every Dry Valley lake with
-  #        blue-box and whole-lake albedo; roughly doubles the run time).
-  rerun_albedo_comparison: true
+  rerun_models: FALSE
 ---
 
 ```{r setup, include = FALSE}
@@ -21,14 +18,16 @@ params:
 path <- path.expand("~/Library/CloudStorage/OneDrive-UCB-O365/Documents/R-Repositories/TVLakes_IceModel")
 if (!dir.exists(path)) stop("Repository folder not found: ", path)
 # Every plot is also saved as a PNG in figures/Antarctica_to_Rockies/ at the repository root,
-# named after the chunk that makes it (e.g. meas-timeseries-1.png; chunks
+# named after the chunk that makes it (e.g. meas-resid-1.png; chunks
 # that draw one plot per lake are numbered in lake order). Re-knitting
 # overwrites them. fig.retina = 2 (the html_document default) doubles dpi, so
 # the PNGs are written at 300 dpi.
 fig_dir <- file.path(path, "figures", "Antarctica_to_Rockies")
 dir.create(fig_dir, showWarnings = FALSE, recursive = TRUE)
+# Every figure is landscape 16:9 (13.33 x 7.5 in, the PowerPoint widescreen
+# slide size), so the saved PNGs drop straight into landscape slides/pages.
 knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE,
-                      fig.width = 10, fig.height = 7,
+                      fig.width = 13.33, fig.height = 7.5,
                       dev = "png", dpi = 150, fig.retina = 2,
                       fig.path = paste0(fig_dir, "/"))
 ```
@@ -188,7 +187,7 @@ run_log |>
 
 ## Ice thickness: all lakes
 
-```{r all-lakes, fig.height = 13}
+```{r all-lakes}
 model_daily <- purrr::imap_dfr(results, function(res, key) {
   res |>
     dplyr::mutate(day = lubridate::floor_date(time, "day")) |>
@@ -206,9 +205,61 @@ ggplot(model_daily, aes(day, thickness)) +
   geom_line(colour = "#2166ac", linewidth = 0.6) +
   geom_point(data = obs_all, aes(date_time, z_water_m),
              colour = "#d6604d", size = 1.4, alpha = 0.8) +
-  facet_wrap(~ lake, ncol = 1, scales = "free") +
+  facet_wrap(~ lake, ncol = 3, scales = "free") +
   labs(x = NULL, y = "Ice thickness (m)",
        caption = "Line = modelled (daily mean); points = observed") +
+  theme_minimal(base_size = 12) +
+  theme(strip.text = element_text(face = "bold", hjust = 0),
+        panel.grid.minor = element_blank())
+```
+
+## Ice-on and ice-off (seasonal lakes)
+
+Modelled ice-off (first day of open water) and ice-on (first day of ice that
+lasts at least a week) for the seasonally frozen lakes, from `ice_phenology()`
+in `R/functions/functions.R`. Open spells shorter than 3 days are ignored, and
+refreezes shorter than 7 days within an open season are counted in
+"Refreezes" rather than ending the season.
+
+```{r ice-phenology-table}
+phenology <- purrr::imap_dfr(results[intersect(c("GL4", "LOC"), names(results))], function(res, key) {
+  ph <- ice_phenology(res)
+  if (is.null(ph)) return(NULL)
+  dplyr::mutate(ph, lake = LAKE_CONFIGS[[key]]$lake_name)
+})
+has_phen <- nrow(phenology) > 0
+if (has_phen) {
+  phenology |>
+    dplyr::transmute(Lake = factor(lake, levels = lake_levels),
+                     `Ice-off` = format(ice_off, "%Y-%m-%d"),
+                     `Ice-on`  = ifelse(is.na(ice_on), "(after end of run)", format(ice_on, "%Y-%m-%d")),
+                     `Open season (days)` = open_season_days,
+                     `Days open` = open_days,
+                     Refreezes = refreezes,
+                     `Max thickness before ice-off (m)` = round(max_thickness, 2)) |>
+    dplyr::arrange(Lake, `Ice-off`) |>
+    knitr::kable(caption = "Modelled ice-off and ice-on dates")
+}
+```
+
+```{r ice-phenology-plot, eval = has_phen}
+# Plot each open season on a common calendar (year 2001) so years line up
+phen_plot <- phenology |>
+  dplyr::mutate(lake  = factor(lake, levels = lake_levels),
+                year  = factor(year),
+                off_d = as.Date(format(ice_off, "2001-%m-%d")),
+                on_d  = as.Date(format(dplyr::coalesce(ice_on, ice_off + open_days), "2001-%m-%d")))
+ggplot(phen_plot, aes(y = year)) +
+  geom_segment(aes(x = off_d, xend = on_d, yend = year), linewidth = 4, colour = "#56B4E9",
+               lineend = "butt") +
+  geom_point(aes(x = off_d), shape = 21, fill = "#E69F00", colour = "white", size = 3) +
+  geom_point(aes(x = on_d), shape = 21, fill = "#0072B2", colour = "white", size = 3) +
+  scale_x_date(date_breaks = "1 month", date_labels = "%b",
+               limits = as.Date(c("2001-05-01", "2001-11-30"))) +
+  scale_y_discrete(limits = rev) +
+  facet_wrap(~ lake, ncol = 2) +
+  labs(x = NULL, y = NULL, title = "Modelled open-water season",
+       subtitle = "Orange = ice-off, dark blue = ice-on; bar = open-water season") +
   theme_minimal(base_size = 12) +
   theme(strip.text = element_text(face = "bold", hjust = 0),
         panel.grid.minor = element_blank())
@@ -287,42 +338,11 @@ meas_long <- meas |>
   )
 
 meas_cols <- c("Depth to water (z_water)" = "#D55E00", "Total ice thickness (z_ice)" = "#009E73")
-
-model_lines <- model_daily_meas |>
-  dplyr::filter(lake_key %in% meas_keys) |>
-  dplyr::left_join(freeboard_mean, by = "lake_key") |>
-  dplyr::mutate(lake = factor(purrr::map_chr(lake_key, ~ LAKE_CONFIGS[[.x]]$lake_name),
-                              levels = lake_levels)) |>
-  dplyr::transmute(lake, day,
-                   `Model (depth-to-water terms)` = model,
-                   `Model + mean freeboard (total thickness)` = model + fb_mean) |>
-  tidyr::pivot_longer(-c(lake, day), names_to = "series", values_to = "m")
-```
-
-### Model against each measurement type
-
-```{r meas-timeseries, fig.height = 12}
-ggplot() +
-  geom_line(data = model_lines, aes(day, m, linetype = series), colour = "#2166AC", linewidth = 0.5) +
-  geom_point(data = meas_long, aes(day, obs, colour = type, shape = type), size = 1.8, alpha = 0.85) +
-  scale_colour_manual(values = meas_cols, name = NULL) +
-  scale_shape_manual(values = c("Depth to water (z_water)" = 16, "Total ice thickness (z_ice)" = 17),
-                     name = NULL) +
-  scale_linetype_manual(values = c("Model (depth-to-water terms)" = "solid",
-                                   "Model + mean freeboard (total thickness)" = "22"), name = NULL) +
-  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
-  facet_wrap(~ lake, ncol = 1, scales = "free_y") +
-  labs(x = NULL, y = "Ice thickness (m)",
-       title = "Modelled ice against both measurement types",
-       subtitle = "Compare orange points with the solid line, and green points with the dashed line.") +
-  theme_minimal(base_size = 12) +
-  theme(strip.text = element_text(face = "bold", hjust = 0),
-        panel.grid.minor = element_blank(), legend.position = "top", legend.box = "vertical")
 ```
 
 ### Residuals by measurement type
 
-```{r meas-resid, fig.height = 9}
+```{r meas-resid}
 ggplot(meas_long, aes(day, resid, colour = type, shape = type)) +
   geom_hline(yintercept = 0, colour = "grey40") +
   geom_vline(xintercept = as.Date("2021-07-01"), colour = "grey80", linetype = "dashed") +
@@ -331,7 +351,7 @@ ggplot(meas_long, aes(day, resid, colour = type, shape = type)) +
   scale_shape_manual(values = c("Depth to water (z_water)" = 16, "Total ice thickness (z_ice)" = 17),
                      name = NULL) +
   scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
-  facet_wrap(~ lake, ncol = 1) +
+  facet_wrap(~ lake, ncol = 2) +
   labs(x = NULL, y = "Model − observed (m)",
        title = "Model error for each measurement type",
        subtitle = "Positive = model too thick. Total thickness is compared with model + mean freeboard. Dashed line = start of 2021–22 season.") +
@@ -340,41 +360,47 @@ ggplot(meas_long, aes(day, resid, colour = type, shape = type)) +
         panel.grid.minor = element_blank(), legend.position = "top")
 ```
 
-```{r meas-table}
-fit_stats <- function(d) dplyr::summarise(d, n = dplyr::n(),
-                                          bias = mean(resid), rmse = sqrt(mean(resid^2)),
-                                          .groups = "drop")
-dplyr::bind_rows(
-  meas_long |> dplyr::group_by(lake, type, period) |> fit_stats(),
-  meas_long |> dplyr::group_by(lake, type) |> fit_stats() |> dplyr::mutate(period = "All")
-) |>
-  dplyr::mutate(period = factor(period, levels = c("2016–2020", "2021 onward", "All")),
-                cell = sprintf("%+.2f / %.2f (n=%d)", bias, rmse, n)) |>
-  dplyr::select(Lake = lake, type, period, cell) |>
-  tidyr::pivot_wider(names_from = period, values_from = cell) |>
-  dplyr::arrange(Lake, type) |>
-  dplyr::rename(`Measurement type` = type) |>
-  knitr::kable(caption = "Model fit by measurement type: bias / RMSE in metres (number of measurements)")
-```
+### Model fit
 
-### Freeboard through time
+Daily mean modelled thickness against every observation the model is fitted
+to (the measurement set by `ICE_OBS_MEASURE` and each lake's hole filter in
+`R/functions/functions.R`). Positive bias = model too thick.
 
-```{r meas-freeboard, fig.height = 7}
-fb <- dplyr::filter(meas, !is.na(freeboard))
-ggplot(fb, aes(day, freeboard)) +
-  geom_hline(data = dplyr::distinct(fb, lake, fb_mean), aes(yintercept = fb_mean),
-             colour = "grey50", linetype = "dashed") +
-  geom_point(aes(shape = grepl("^Inside", hole)), colour = "#0072B2", size = 2, alpha = 0.85) +
-  scale_shape_manual(values = c(`TRUE` = 16, `FALSE` = 1), breaks = c(TRUE, FALSE),
-                     labels = c(`TRUE` = "Inside hole", `FALSE` = "Other hole"), name = NULL) +
-  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
-  facet_wrap(~ lake, ncol = 2) +
-  labs(x = NULL, y = "Freeboard: z_ice − z_water (m)",
-       title = "Freeboard at each measurement",
-       subtitle = "Dashed line = mean freeboard added to the model for the total-thickness comparison.") +
-  theme_minimal(base_size = 12) +
-  theme(strip.text = element_text(face = "bold", hjust = 0),
-        panel.grid.minor = element_blank(), legend.position = "top")
+```{r fit-table}
+fit_obs <- purrr::imap_dfr(results, function(res, key) {
+  o <- ice_obs[[key]]
+  if (is.null(o) || nrow(o) == 0) return(NULL)
+  model_day <- res |>
+    dplyr::mutate(day = as.Date(time)) |>
+    dplyr::group_by(day) |>
+    dplyr::summarise(model = mean(thickness, na.rm = TRUE), .groups = "drop")
+  tibble::tibble(lake_key = key, day = as.Date(o$date_time), obs = abs(o$z_water_m)) |>
+    dplyr::inner_join(model_day, by = "day")
+}) |>
+  dplyr::mutate(resid = model - obs,
+                lake  = factor(purrr::map_chr(lake_key, ~ LAKE_CONFIGS[[.x]]$lake_name),
+                               levels = lake_levels))
+
+period_cells <- fit_obs |>
+  dplyr::mutate(period = ifelse(day < as.Date("2021-07-01"),
+                                "2016–2020: bias / RMSE", "2021 onward: bias / RMSE")) |>
+  dplyr::group_by(lake, period) |>
+  dplyr::summarise(cell = sprintf("%+.2f / %.2f (n=%d)", mean(resid), sqrt(mean(resid^2)), dplyr::n()),
+                   .groups = "drop") |>
+  tidyr::pivot_wider(names_from = period, values_from = cell)
+
+fit_obs |>
+  dplyr::group_by(lake) |>
+  dplyr::summarise(n          = dplyr::n(),
+                   `Bias (m)` = mean(resid),
+                   `RMSE (m)` = sqrt(mean(resid^2)),
+                   `MAE (m)`  = mean(abs(resid)),
+                   r          = if (dplyr::n() > 2) stats::cor(model, obs) else NA_real_,
+                   .groups = "drop") |>
+  dplyr::left_join(period_cells, by = "lake") |>
+  dplyr::rename(Lake = lake) |>
+  knitr::kable(digits = 2, align = "lrrrrrll",
+               caption = "Model fit to observed ice thickness (m). Bias and RMSE by period: bias / RMSE (number of observations).")
 ```
 
 ### Lake levels
@@ -386,7 +412,7 @@ connect through the narrows. Rising water lifts the water level in a sampling
 hole relative to the ice surface, which changes the depth-to-water
 measurement and can bring heat to the ice base. Shading = model period.
 
-```{r lake-levels, fig.height = 7}
+```{r lake-levels}
 levels_raw <- readr::read_csv(file.path(path, "Data/mcmlter-lake-levels-20260318.csv"),
                               show_col_types = FALSE)
 level_lakes <- c("East Lake Bonney" = "Lake Bonney (WLB + ELB)",
@@ -410,147 +436,13 @@ ggplot(lake_levels_df, aes(date, level)) +
                       labels = c(`TRUE` = "Summer survey (Dec–Feb)", `FALSE` = "Spring survey (Oct–Nov)"),
                       name = NULL) +
   scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
-  facet_wrap(~ lake, ncol = 1, scales = "free_y") +
+  facet_wrap(~ lake, ncol = 3, scales = "free_y") +
   labs(x = NULL, y = "Lake level (m above sea level)",
        title = "Surveyed lake levels",
        subtitle = "Summer surveys come after the melt season; spring surveys before it.") +
   theme_minimal(base_size = 12) +
   theme(strip.text = element_text(face = "bold", hjust = 0),
         panel.grid.minor = element_blank(), legend.position = "top")
-```
-
-## Albedo source: blue box vs whole lake
-
-The Dry Valley lakes' albedo comes from `Data/AlbedoModel.csv`, which has two
-estimates: the **blue-box** pixel (`albedo.predict.bb`, the default model
-setup) and the **whole-lake** mean (`albedo.predict.wholelake`). These plots
-compare model runs that are identical except for which one is used. The runs
-come from `R/Compare_Albedo_Sources.R` (knit with
-`rerun_albedo_comparison: true` to re-run them).
-
-```{r albedo-compare-run, eval = isTRUE(params$rerun_albedo_comparison)}
-local({
-  old_wd <- setwd(path)
-  on.exit(setwd(old_wd), add = TRUE)
-  source("R/Compare_Albedo_Sources.R", local = new.env(parent = globalenv()))
-})
-```
-
-```{r albedo-compare-load}
-alb_dir   <- file.path(path, "Data/model_outputs/albedo_comparison")
-alb_files <- list.files(alb_dir, pattern = "_(bb|wholelake)_output\\.csv$", full.names = TRUE)
-alb_src_labels <- c(bb        = "Blue box (albedo.predict.bb)",
-                    wholelake = "Whole lake (albedo.predict.wholelake)")
-alb_cols <- setNames(c("#0072B2", "#E69F00"), alb_src_labels)
-
-# Only build the table when comparison runs exist (with no files there are no
-# columns, so `time` would resolve to base R's time() function)
-has_alb <- length(alb_files) > 0
-if (has_alb) {
-  alb_daily <- purrr::map_dfr(alb_files, readr::read_csv, show_col_types = FALSE) |>
-    dplyr::mutate(day = as.Date(time)) |>
-    dplyr::group_by(lake_key, albedo_source, day) |>
-    dplyr::summarise(thickness = mean(thickness), albedo = mean(albedo),
-                     SW_abs = mean(SW_abs), surface_loss = sum(surface_loss),
-                     .groups = "drop") |>
-    dplyr::mutate(lake   = factor(purrr::map_chr(lake_key, ~ LAKE_CONFIGS[[.x]]$lake_name),
-                                  levels = lake_levels),
-                  source = factor(alb_src_labels[albedo_source], levels = alb_src_labels))
-}
-```
-
-`r if (!has_alb) "**No albedo comparison runs found.** Knit once with <code>rerun_albedo_comparison: true</code>, or run <code>R/Compare_Albedo_Sources.R</code> from the repository root." else ""`
-
-### Albedo forcing
-
-```{r albedo-compare-forcing, fig.height = 9, eval = has_alb}
-# Albedo only matters when the sun is up, so show the Oct–Feb summer values
-alb_summer <- dplyr::filter(alb_daily, lubridate::month(day) %in% c(10, 11, 12, 1, 2))
-ggplot(alb_summer, aes(day, albedo, colour = source)) +
-  geom_point(size = 0.6, alpha = 0.6) +
-  scale_colour_manual(values = alb_cols, name = NULL) +
-  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
-  facet_wrap(~ lake, ncol = 1) +
-  labs(x = NULL, y = "Albedo",
-       title = "Albedo forcing from each source (Oct–Feb)",
-       subtitle = "Daily values; each summer's images are carried forward between acquisition dates.") +
-  theme_minimal(base_size = 12) +
-  theme(strip.text = element_text(face = "bold", hjust = 0),
-        panel.grid.minor = element_blank(), legend.position = "top") +
-  guides(colour = guide_legend(override.aes = list(size = 3, alpha = 1)))
-```
-
-### Modelled ice thickness
-
-```{r albedo-compare-thickness, fig.height = 11, eval = has_alb}
-alb_obs <- purrr::map_dfr(intersect(names(ice_obs), unique(alb_daily$lake_key)), function(key) {
-  o <- ice_obs[[key]]
-  if (is.null(o) || nrow(o) == 0) return(NULL)
-  tibble::tibble(lake_key = key, day = as.Date(o$date_time), obs = o$z_water_m)
-}) |>
-  dplyr::mutate(lake = factor(purrr::map_chr(lake_key, ~ LAKE_CONFIGS[[.x]]$lake_name),
-                              levels = lake_levels))
-
-ggplot(alb_daily, aes(day, thickness, colour = source)) +
-  geom_line(linewidth = 0.6) +
-  geom_point(data = alb_obs, aes(day, obs), inherit.aes = FALSE,
-             colour = "grey15", size = 1.5) +
-  scale_colour_manual(values = alb_cols, name = NULL) +
-  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
-  facet_wrap(~ lake, ncol = 1, scales = "free_y") +
-  labs(x = NULL, y = "Ice thickness (m)",
-       title = "Modelled ice thickness with each albedo source",
-       subtitle = "Black points = observed depth to water (same holes as the main model fit).") +
-  theme_minimal(base_size = 12) +
-  theme(strip.text = element_text(face = "bold", hjust = 0),
-        panel.grid.minor = element_blank(), legend.position = "top")
-```
-
-```{r albedo-compare-diff, fig.height = 7, eval = has_alb}
-alb_diff <- alb_daily |>
-  dplyr::select(lake, day, albedo_source, thickness) |>
-  tidyr::pivot_wider(names_from = albedo_source, values_from = thickness) |>
-  dplyr::filter(!is.na(bb), !is.na(wholelake)) |>
-  dplyr::mutate(diff = wholelake - bb)
-
-ggplot(alb_diff, aes(day, diff)) +
-  geom_hline(yintercept = 0, colour = "grey40") +
-  geom_line(colour = "#7A4F9A", linewidth = 0.7) +
-  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
-  facet_wrap(~ lake, ncol = 2) +
-  labs(x = NULL, y = "Whole lake − blue box (m)",
-       title = "Difference in modelled thickness",
-       subtitle = "Negative = thinner ice with whole-lake albedo.") +
-  theme_minimal(base_size = 12) +
-  theme(strip.text = element_text(face = "bold", hjust = 0),
-        panel.grid.minor = element_blank())
-```
-
-```{r albedo-compare-table, eval = has_alb}
-alb_fit <- alb_obs |>
-  dplyr::inner_join(dplyr::select(alb_daily, lake_key, lake, day, source, thickness),
-                    by = c("lake_key", "lake", "day")) |>
-  dplyr::mutate(resid  = thickness - obs,
-                period = ifelse(day < as.Date("2021-07-01"), "2016–2020", "2021 onward"))
-fit_cells <- function(d) dplyr::summarise(d, cell = sprintf("%+.2f / %.2f (n=%d)",
-                                                             mean(resid), sqrt(mean(resid^2)), dplyr::n()),
-                                          .groups = "drop")
-summer_sw <- alb_daily |>
-  dplyr::filter(lubridate::month(day) %in% c(11, 12, 1, 2)) |>
-  dplyr::group_by(lake, source) |>
-  dplyr::summarise(`Mean summer albedo` = sprintf("%.2f", mean(albedo)),
-                   `Mean summer SW_abs (W m⁻²)` = sprintf("%.1f", mean(SW_abs)),
-                   .groups = "drop")
-dplyr::bind_rows(
-  alb_fit |> dplyr::group_by(lake, source, period) |> fit_cells(),
-  alb_fit |> dplyr::group_by(lake, source) |> fit_cells() |> dplyr::mutate(period = "All")
-) |>
-  dplyr::mutate(period = factor(period, levels = c("2016–2020", "2021 onward", "All"))) |>
-  tidyr::pivot_wider(names_from = period, values_from = cell) |>
-  dplyr::left_join(summer_sw, by = c("lake", "source")) |>
-  dplyr::arrange(lake, source) |>
-  dplyr::rename(Lake = lake, `Albedo source` = source) |>
-  knitr::kable(caption = "Fit to observed depth to water (bias / RMSE in m, n) and summer (Nov–Feb) forcing for each albedo source")
 ```
 
 ## Model input time series
@@ -633,7 +525,7 @@ plot_forcing <- function(key) {
     geom_line(aes(y = smooth), colour = lake_cols_ts[[LAKE_CONFIGS[[key]]$lake_name]],
               linewidth = 0.8, na.rm = TRUE) +
     scale_x_date(date_breaks = "1 year", date_labels = "%Y", expand = c(0.01, 0)) +
-    facet_wrap(~ variable, ncol = 1, scales = "free_y", strip.position = "top") +
+    facet_wrap(~ variable, ncol = 3, scales = "free_y", strip.position = "top") +
     labs(x = NULL, y = NULL,
          subtitle = paste0("Grey = daily mean; coloured = 30-day running mean",
                            if (nrow(ip) > 0) "; blue shading = ice-covered periods" else "", ".")) +
@@ -649,13 +541,13 @@ forcing_tab <- function(key) {
 }
 ```
 
-```{r forcing-tabs, results = "asis", fig.height = 13, fig.width = 11, eval = nrow(forcing) > 0}
+```{r forcing-tabs, results = "asis", eval = nrow(forcing) > 0}
 for (key in lakes$lake_key) forcing_tab(key)
 ```
 
 ### Comparing inputs across lakes
 
-```{r forcing-compare, fig.height = 11, eval = nrow(forcing) > 0}
+```{r forcing-compare, eval = nrow(forcing) > 0}
 forcing_clim <- forcing_long |>
   dplyr::mutate(month = lubridate::month(day)) |>
   dplyr::group_by(region, lake, variable, month) |>
@@ -668,7 +560,7 @@ ggplot(forcing_clim, aes(month, value, colour = lake, linetype = region)) +
   scale_colour_manual(values = lake_cols_ts, name = NULL) +
   scale_linetype_manual(values = c("McMurdo Dry Valleys" = "solid", "Colorado Rockies" = "22"),
                         name = NULL) +
-  facet_wrap(~ variable, ncol = 2, scales = "free_y") +
+  facet_wrap(~ variable, ncol = 3, scales = "free_y") +
   labs(x = NULL, y = NULL,
        title = "Monthly climatology of the model inputs",
        subtitle = "Mean of daily values by calendar month over each lake's run. Dry Valleys summer = Dec–Jan; Rockies summer = Jun–Jul.") +
@@ -755,7 +647,7 @@ season_cols <- c(Winter = "#0072B2", Spring = "#009E73", Summer = "#E69F00", Aut
 
 ### Temperature through the ice column over time
 
-```{r profile-heatmap, fig.height = 15, eval = nrow(profiles) > 0}
+```{r profile-heatmap, eval = nrow(profiles) > 0}
 # Weekly means keep the plot readable over 7–11 years of daily profiles
 prof_week <- profiles |>
   dplyr::mutate(week = as.Date(lubridate::floor_date(time, "week"))) |>
@@ -767,7 +659,7 @@ ggplot(prof_week, aes(week, depth, fill = temp_C)) +
   scale_y_reverse(expand = c(0, 0)) +
   scale_x_date(expand = c(0, 0), date_breaks = "1 year", date_labels = "%Y") +
   scale_fill_viridis_c(option = "mako", name = "Ice\ntemperature\n(°C)") +
-  facet_wrap(~ lake, ncol = 1, scales = "free") +
+  facet_wrap(~ lake, ncol = 2, scales = "free") +
   labs(x = NULL, y = "Depth below ice surface (m)",
        title = "Modelled ice temperature with depth through time",
        subtitle = "Weekly mean of daily profiles. The bottom edge of the colour is the ice base; gaps are open water.") +
@@ -779,7 +671,7 @@ ggplot(prof_week, aes(week, depth, fill = temp_C)) +
 
 ### Seasonal mean profiles
 
-```{r profile-seasonal, fig.height = 8, eval = nrow(profiles) > 0}
+```{r profile-seasonal, eval = nrow(profiles) > 0}
 # Mean profile per season, with the 10th–90th percentile of daily values.
 # Depths with fewer than 20 daily profiles in a season (the thickest, least
 # frequent ice) are dropped so the means aren't based on a handful of days.
@@ -916,7 +808,7 @@ flux_theme <- theme_minimal(base_size = 12) +
 
 ### Flux magnitude across sites
 
-```{r flux-magnitude, fig.height = 6}
+```{r flux-magnitude}
 ggplot(flux_summary, aes(mean_abs, forcats::fct_rev(lake), colour = flux)) +
   geom_point(size = 3.5, alpha = 0.9) +
   scale_x_log10(breaks = 10^(-3:2),
@@ -941,7 +833,7 @@ flux_summary |>
 
 ### Energy sources and sinks
 
-```{r flux-signed, fig.height = 6}
+```{r flux-signed}
 ggplot(flux_summary, aes(mean_signed, forcats::fct_rev(lake), fill = flux)) +
   geom_col(width = 0.65, colour = "white", linewidth = 0.4) +
   geom_vline(xintercept = 0, colour = "grey30") +
@@ -971,14 +863,14 @@ flux_summary |>
 
 ### Seasonal cycle
 
-```{r flux-seasonal, fig.height = 10}
+```{r flux-seasonal}
 ggplot(flux_monthly, aes(month, value, colour = flux)) +
   geom_hline(yintercept = 0, colour = "grey60") +
   geom_line(linewidth = 0.8, na.rm = TRUE) +
   geom_point(size = 1.6, na.rm = TRUE) +
   scale_x_continuous(breaks = 1:12, labels = substr(month.abb, 1, 1)) +
   scale_colour_manual(values = flux_cols, name = NULL) +
-  facet_wrap(~ lake, ncol = 2) +
+  facet_wrap(~ lake, ncol = 3) +
   labs(x = NULL, y = "Monthly mean flux (W m⁻²)",
        title = "Monthly flux climatology",
        subtitle = "Dry Valleys summer = Dec–Jan; Rockies summer = Jun–Jul.\nGaps = open water (< 10 days of ice in that month).") +
@@ -1093,7 +985,7 @@ plot_lake_fluxes <- function(key) {
     scale_x_continuous(breaks = 1:12, labels = substr(month.abb, 1, 1)) +
     scale_colour_manual(values = flux_cols, guide = "none") +
     scale_fill_manual(values = flux_cols, guide = "none") +
-    facet_wrap(~ flux, nrow = 1, scales = "free_y") +
+    facet_wrap(~ flux, ncol = 3, scales = "free_y") +
     labs(x = NULL, y = "W m⁻²",
          subtitle = "Monthly mean (line) and 10th–90th percentile of hourly values (band). Each panel has its own y-axis.") +
     flux_theme
@@ -1107,6 +999,6 @@ flux_tab <- function(key) {
 }
 ```
 
-```{r flux-tabs, results = "asis", fig.height = 3.2, fig.width = 12}
+```{r flux-tabs, results = "asis"}
 for (key in lakes$lake_key) flux_tab(key)
 ```

@@ -54,4 +54,5 @@ plot_ice_model(
                           inputs$params$n_years, warming_rate * 100)
 )
  # write output to model_outputs folder
+
 write_csv(results_ELB, "Data/model_outputs/ELB_2017_2024_output.csv")
