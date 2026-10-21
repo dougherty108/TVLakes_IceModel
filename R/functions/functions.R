@@ -69,7 +69,13 @@ CONSTANTS <- list(
   #              0 °C; negative balances cool the ice instead of being discarded.
   #              In this mode delta_T_method and Qc_method are not used.
   surface_bc     = "flux",
-  sw_to_base     = 0.0,       # fraction of SW transmitted through the ice base that melts
+  # Ice genesis (seasonally frozen lakes only): while the new season's ice is still
+  # thinner than genesis_L, genesis_bc sets the surface boundary. "air_temp" pins
+  # the surface to the air temperature during freeze-up and hands over to the flux
+  # solver once the ice is established; "flux" (default) uses surface_bc throughout.
+  genesis_bc     = "flux",
+  genesis_L      = 0.20,      # m; ice thickness at which genesis ends
+  sw_to_base     = 0.00,       # fraction of SW transmitted through the ice base that melts
                               # the base; the rest heats the lake (0 = all to the lake)
 
   # Model grid
@@ -94,7 +100,7 @@ CONSTANTS <- list(
   ice_off_months    = 4:9,    # months when that melt-out rule applies (N. hemisphere spring/summer)
   albedo_water      = 0.06,   # open-water albedo (replaces time_series$albedo when
                                # the lake is ice-free; typical clear-water value)
-  albedo_ice        = 0.85    # default ice/snow albedo for lakes with no AlbedoModel
+  albedo_ice        = 0.60    # default ice/snow albedo for lakes with no AlbedoModel
                                # data (overridden per-lake via LAKE_CONFIGS$albedo_ice;
                                # applied as the constant time_series$albedo for those lakes)
 )
@@ -222,6 +228,21 @@ LAKE_CONFIGS <- list(
     Chi               = 0.00,
     albedo_multiplier = 1.00,
     albedo_ice        = 0.60,   # constant dummy albedo — no AlbedoModel.csv for GL4
+
+    # -- Light penetration: clear, translucent seasonal ice ------------------
+    # Clear lake ice lets far more light through than the bubbly/sediment-laden
+    # perennial Dry Valley ice, so a large share of the winter shortwave reaches
+    # the water column. Little internal melt is expected, so meltwater is not
+    # retained. Chosen by fit to GL4 thickness + Loch ice-off dates (Oct 2026).
+    i0                = 0.70,   # share of net SW passing below the surface layer (DV: 0.55)
+    kappa_ice         = 0.50,   # bulk extinction of clear ice (m^-1; DV: 0.85–1.08)
+    sw_to_base        = 0.50,   # share of light leaving the ice base that melts the base
+                                # (the rest warms the water column under the ice)
+    retain_meltwater  = FALSE,
+
+    # -- Ice genesis: air-temperature surface until the ice is established ---
+    genesis_bc        = "air_temp", # flux solver switched off during freeze-up
+    genesis_L         = 0.20,       # m; flux solver takes over once ice passes this
     seasonally_frozen = TRUE,
     start_filter      = as.POSIXct("2014-01-01 00:00:00"),
 
@@ -246,6 +267,21 @@ LAKE_CONFIGS <- list(
     Chi               = 0.00,   # same as GL4 until Loch-specific tuning is available
     albedo_multiplier = 1.00,
     albedo_ice        = 0.85,   # constant dummy albedo (same as GL4) — no albedo data for the Loch
+
+    # -- Light penetration: clear, translucent seasonal ice ------------------
+    # Clear lake ice lets far more light through than the bubbly/sediment-laden
+    # perennial Dry Valley ice, so a large share of the winter shortwave reaches
+    # the water column. Little internal melt is expected, so meltwater is not
+    # retained. Chosen by fit to GL4 thickness + Loch ice-off dates (Oct 2026).
+    i0                = 0.70,   # share of net SW passing below the surface layer (DV: 0.55)
+    kappa_ice         = 0.50,   # bulk extinction of clear ice (m^-1; DV: 0.85–1.08)
+    sw_to_base        = 0.50,   # share of light leaving the ice base that melts the base
+                                # (the rest warms the water column under the ice)
+    retain_meltwater  = FALSE,
+
+    # -- Ice genesis: air-temperature surface until the ice is established ---
+    genesis_bc        = "air_temp", # flux solver switched off during freeze-up
+    genesis_L         = 0.20,       # m; flux solver takes over once ice passes this
     seasonally_frozen = TRUE,
     start_filter      = as.POSIXct("2017-01-01 07:00:00", tz = "UTC"),  # first LVWS record (00:00 MST)
 
@@ -319,7 +355,8 @@ lake_constants <- function(lake_key, lake_configs = LAKE_CONFIGS, constants = CO
   if (!is.null(cfg$ice_off_months))    overrides$ice_off_months    <- cfg$ice_off_months
   # optional per-lake shortwave-penetration settings
   for (nm in c("sw_penetration", "i0", "kappa_ice", "sw_to_base",
-               "retain_meltwater", "phi_max", "Qc_method", "surface_bc"))
+               "retain_meltwater", "phi_max", "Qc_method", "surface_bc",
+               "genesis_bc", "genesis_L"))
     if (!is.null(cfg[[nm]])) overrides[[nm]] <- cfg[[nm]]
   modifyList(constants, overrides)
 }
@@ -1462,6 +1499,8 @@ run_ice_model <- function(
   retain_mw      <- sw_penetration && !isFALSE(constants$retain_meltwater)
   phi_max        <- constants$phi_max %||% 0.30
   surface_bc     <- match.arg(constants$surface_bc %||% "air_temp", c("air_temp", "flux"))
+  genesis_bc     <- match.arg(constants$genesis_bc %||% "flux", c("flux", "air_temp"))
+  genesis_L      <- constants$genesis_L %||% 0.20
   Qc_method      <- match.arg(constants$Qc_method %||% "air_change",
                               c("air_change", "ice_gradient", "ice_gradient_sink", "none"))
 
@@ -1570,8 +1609,12 @@ run_ice_model <- function(
       if (any(is.na(newT))) newT <- prevT
 
       # -- Boundary conditions ---------------------------------------------
+      # Flux solver on, unless this is ice genesis on a seasonal lake with
+      # genesis_bc = "air_temp" (season's ice not yet thicker than genesis_L)
+      in_genesis <- seasonally_frozen && genesis_bc == "air_temp" && season_max_L < genesis_L
+      use_flux   <- surface_bc == "flux" && !in_genesis
       if (n_nodes >= 2) {
-        if (surface_bc == "air_temp" || is.na(newT[1])) newT[1] <- T_air  # "flux": solved below
+        if (!use_flux || is.na(newT[1])) newT[1] <- T_air  # flux: solved below
         newT[n_nodes] <- Tf
       } else if (n_nodes == 1) {
         newT[1] <- T_air
@@ -1705,7 +1748,7 @@ run_ice_model <- function(
       }
 
       # -- Flux surface boundary: solve the surface-layer temperature ----------
-      if (surface_bc == "flux" && n_nodes >= 2 && !is.na(prevL) && prevL > 0 &&
+      if (use_flux && n_nodes >= 2 && !is.na(prevL) && prevL > 0 &&
           !anyNA(c(T_air, LWR_in, wind, press, rh, SW_abs, newT[1], newT[2]))) {
         h_s   <- prevL / (n_nodes - 1)
         C_s   <- rho_c_ice * h_s / 2                      # J m^-2 K^-1 (top half-slice)
