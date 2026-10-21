@@ -243,6 +243,11 @@ LAKE_CONFIGS <- list(
     # -- Ice genesis: air-temperature surface until the ice is established ---
     genesis_bc        = "air_temp", # flux solver switched off during freeze-up
     genesis_L         = 0.20,       # m; flux solver takes over once ice passes this
+
+    # -- Open-water heat store: ice-on follows fall mixis --------------------
+    # The whole water column must cool to 0 °C before ice can form, not just a
+    # thin surface layer (default 0.5 m froze ~3 weeks too early at the Loch).
+    mixing_depth      = 5.0,        # m
     seasonally_frozen = TRUE,
     start_filter      = as.POSIXct("2014-01-01 00:00:00"),
 
@@ -282,6 +287,11 @@ LAKE_CONFIGS <- list(
     # -- Ice genesis: air-temperature surface until the ice is established ---
     genesis_bc        = "air_temp", # flux solver switched off during freeze-up
     genesis_L         = 0.20,       # m; flux solver takes over once ice passes this
+
+    # -- Open-water heat store: ice-on follows fall mixis --------------------
+    # The whole water column must cool to 0 °C before ice can form, not just a
+    # thin surface layer (default 0.5 m froze ~3 weeks too early at the Loch).
+    mixing_depth      = 5.0,        # m
     seasonally_frozen = TRUE,
     start_filter      = as.POSIXct("2017-01-01 07:00:00", tz = "UTC"),  # first LVWS record (00:00 MST)
 
@@ -356,7 +366,7 @@ lake_constants <- function(lake_key, lake_configs = LAKE_CONFIGS, constants = CO
   # optional per-lake shortwave-penetration settings
   for (nm in c("sw_penetration", "i0", "kappa_ice", "sw_to_base",
                "retain_meltwater", "phi_max", "Qc_method", "surface_bc",
-               "genesis_bc", "genesis_L"))
+               "genesis_bc", "genesis_L", "mixing_depth"))
     if (!is.null(cfg[[nm]])) overrides[[nm]] <- cfg[[nm]]
   modifyList(constants, overrides)
 }
