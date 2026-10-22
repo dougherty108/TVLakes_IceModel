@@ -1222,8 +1222,9 @@ prepare_loc_model_inputs <- function(
       # Saturation / actual vapour pressure (Pa) via Magnus formula
       e_sat = 611.0 * exp(17.27 * T_air_C / (T_air_C + 237.3)),
       e_a   = (RH / 100) * e_sat,
-      # Brutsaert (1975) atmospheric emissivity — same as GL4
-      emissivity_atm = pmin(pmax(1.24 * (e_a / T_air)^(1/7), 0.6), 1.0),
+      # Brutsaert (1975) atmospheric emissivity — same as GL4. e_a must be in hPa
+      # (was e_a in Pa, which pinned the sky emissivity at 1.0; fixed 2026-10-21)
+      emissivity_atm = pmin(pmax(1.24 * ((e_a / 100) / T_air)^(1/7), 0.6), 1.0),
       LWR_in  = emissivity_atm * constants$sigma * T_air^4,
       LWR_out = constants$emissivity * constants$sigma * constants$Tf^4,
       albedo  = consts$albedo_ice        # constant (no albedo data for the Loch)
